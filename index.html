@@ -40,6 +40,7 @@
   tr.me td { background:#fffbeb; }
   .tag { display:inline-block; font-size:11px; padding:1px 7px; border-radius:99px; background:#dbeafe; color:var(--main); margin-left:6px; }
   .gcal { display:inline-block; padding:8px 14px; border:1px solid #c7d2fe; border-radius:8px; background:#eef2ff; color:var(--main); text-decoration:none; font-weight:600; }
+  .card.ask { border:2px solid #f59e0b; background:#fffbeb; }
   ul.log { margin:0; padding-left:18px; font-size:13px; line-height:1.8; color:#374151; }
   .setup { text-align:center; padding:30px 10px; }
   .setup input { width:100%; font-size:14px; padding:10px; border:1px solid var(--line); border-radius:8px; margin:10px 0; }
@@ -124,16 +125,31 @@ function pickPresenter(date, excluded){
   ys.sort(priorityCmp);
   return ys.length ? ys[0].id : null;
 }
+/* 今日（JST）から対象日までの日数 */
+function daysUntil(dateStr){
+  const t0 = new Date(jstToday() + "T00:00:00+09:00");
+  const t1 = new Date(dateStr + "T00:00:00+09:00");
+  return Math.round((t1 - t0) / 86400000);
+}
 /* 現在の決定を導出する（保存値ではなく常に再計算） */
 function derive(){
   const r = S.round;
   for (const date of r.candidates) {
     if (yesIds(date).length >= NEED) {
       const ex = (r.decidedDate === date) ? (r.excludedPresenters || []) : [];
-      return { date: date, presenterId: pickPresenter(date, ex), excluded: ex };
+      const ask = (r.ask && r.ask.forDate === date && r.decidedDate === date) ? r.ask : null;
+      let pid;
+      if (r.presenterOverride && yesIds(date).includes(r.presenterOverride) && !ex.includes(r.presenterOverride)) {
+        pid = r.presenterOverride;
+      } else if (ask) {
+        pid = null;
+      } else {
+        pid = pickPresenter(date, ex);
+      }
+      return { date: date, presenterId: pid, excluded: ex, ask: ask };
     }
   }
-  return { date: null, presenterId: null, excluded: [] };
+  return { date: null, presenterId: null, excluded: [], ask: null };
 }
 
 /* ===== GitHub読み書き ===== */
@@ -173,6 +189,35 @@ async function mutate(fn, message) {
   }
   saving = false; render();
 }
+/* 担当の確認を次の候補へ進める（候補が尽きたらその回は見送り） */
+function advanceAsk(record) {
+  const r = S.round;
+  const ask = r.ask;
+  if (!ask) return;
+  const prev = ask.candidateId;
+  if (prev) {
+    if (!ask.declined.includes(prev)) ask.declined.push(prev);
+    r.excludedPresenters = [...(r.excludedPresenters || [])];
+    if (!r.excludedPresenters.includes(prev)) r.excludedPresenters.push(prev);
+  }
+  const next = pickPresenter(ask.forDate, r.excludedPresenters || []);
+  if (next) {
+    ask.candidateId = next;
+    if (record) pushHistory("次は " + member(next).name + " さんに担当を確認中です");
+  } else {
+    cancelRoundNoPresenter(record);
+  }
+}
+/* 担当を引き受けられる方がいないため、その回を見送る */
+function cancelRoundNoPresenter(record) {
+  const r = S.round;
+  const date = (r.ask && r.ask.forDate) || r.decidedDate;
+  if (record && date) pushHistory(fmtDate(date) + " の抄読会は、担当を引き受けられる方がいなかったため見送りになりました");
+  const keep = {};
+  const newCands = nextTuesdays(date, 4);
+  for (const id of Object.keys(r.responses || {})) { keep[id] = {}; for (const nd of newCands) if (r.responses[id][nd]) keep[id][nd] = r.responses[id][nd]; }
+  S.round = { seq: (r.seq || 1) + 1, candidates: newCands, responses: keep, excludedPresenters: [], decidedDate: null, decidedAt: null, presenterId: null, presenterDecidedAt: null, ask: null, presenterOverride: null };
+}
 /* 導出した決定と保存値を同期し、変化があれば履歴に残す（書き込みは呼び出し側） */
 function syncDecision(record) {
   const d = derive();
@@ -183,10 +228,36 @@ function syncDecision(record) {
     r.decidedDate = d.date; r.decidedAt = d.date ? now : null;
     r.excludedPresenters = d.excluded;
     r.presenterId = d.presenterId; r.presenterDecidedAt = d.presenterId ? now : null;
+    r.ask = null; r.presenterOverride = null;
     if (record && d.presenterId) pushHistory("担当が " + member(d.presenterId).name + " さんに自動決定しました");
-  } else if (d.presenterId !== r.presenterId) {
-    if (record && d.presenterId) pushHistory("担当が " + member(d.presenterId).name + " さんに自動で繰り上がりました");
-    r.presenterId = d.presenterId; r.presenterDecidedAt = d.presenterId ? now : null;
+    return;
+  }
+  if (!d.date) return;
+  /* 同じ開催日のまま、担当まわりに変化があった場合 */
+  if (r.ask) {
+    const cand = r.ask.candidateId;
+    if (cand && !yesIds(d.date).includes(cand)) {
+      if (record) pushHistory(member(cand).name + " さんが " + fmtDate(d.date) + " の出欠を×にしたため、担当の確認を次へ進めます");
+      advanceAsk(record);
+      if (S.round !== r) return;
+    }
+    r.presenterId = derive().presenterId;
+    return;
+  }
+  if (d.presenterId !== r.presenterId) {
+    const old = r.presenterId;
+    const oldDropped = old && (!yesIds(d.date).includes(old) || (r.excludedPresenters || []).includes(old));
+    if (old && oldDropped && daysUntil(d.date) <= 7) {
+      /* 開催まで1週間以内の担当欠席 → 自動繰り上げせず、次点に確認する */
+      r.ask = { forDate: d.date, candidateId: d.presenterId, declined: [], droppedId: old, since: now };
+      r.presenterId = null; r.presenterDecidedAt = null;
+      if (record) pushHistory(fmtDate(d.date) + " の担当だった " + member(old).name + " さんが来れなくなりました。開催まで1週間を切っているため、自動では決めず次点の方に確認します");
+      if (d.presenterId) { if (record) pushHistory("次は " + member(d.presenterId).name + " さんに担当を確認中です"); }
+      else cancelRoundNoPresenter(record);
+    } else {
+      if (record && d.presenterId && old) pushHistory("担当が " + member(d.presenterId).name + " さんに自動で繰り上がりました");
+      r.presenterId = d.presenterId; r.presenterDecidedAt = d.presenterId ? now : null;
+    }
   }
 }
 function pushHistory(text) {
@@ -210,10 +281,11 @@ function render() {
   h += '<div class="card next"><h2>次回の抄読会</h2>';
   if (d.date) {
     const att = yesIds(d.date).map(id => member(id).name);
-    h += '<div class="big">' + fmtDate(d.date) + " " + TIME_LABEL + "<br>担当：<span class='presenter'>" +
-         (d.presenterId ? esc(member(d.presenterId).name) + " さん" : "（未定）") + "</span></div>";
+    const pLabel = d.ask ? "調整中（" + esc(member(d.ask.candidateId).name) + " さんに確認中）"
+      : (d.presenterId ? esc(member(d.presenterId).name) + " さん" : "（未定）");
+    h += '<div class="big">' + fmtDate(d.date) + " " + TIME_LABEL + "<br>担当：<span class='presenter'>" + pLabel + "</span></div>";
     h += '<p class="muted">出席予定 ' + att.length + "名：" + att.map(esc).join("、") + "</p>";
-    const pName = d.presenterId ? member(d.presenterId).name + " さん" : "（未定）";
+    const pName = d.ask ? "調整中" : (d.presenterId ? member(d.presenterId).name + " さん" : "（未定）");
     const gUrl = "https://calendar.google.com/calendar/render?action=TEMPLATE&text=" + encodeURIComponent("抄読会") +
       "&dates=" + d.date.replace(/-/g, "") + "T100000Z/" + d.date.replace(/-/g, "") + "T103000Z" +
       "&details=" + encodeURIComponent("担当：" + pName + "\n出欠の変更はアプリからお願いします");
@@ -250,13 +322,22 @@ function render() {
   }
   h += "</div>";
 
+  /* 担当確認カード（自分が確認対象のとき） */
+  if (d.ask && myId && d.ask.candidateId === myId) {
+    const dropped = d.ask.droppedId && member(d.ask.droppedId) ? member(d.ask.droppedId).name : "";
+    h += '<div class="card ask"><h2>急な担当のお願い🙏</h2>' +
+      '<p>' + fmtDate(d.ask.forDate) + ' の担当だった ' + esc(dropped) + ' さんが来れなくなりました。<br>次点はあなたです。担当を引き受けられますか？</p>' +
+      '<div class="actions"><button id="btnAskYes">引き受ける</button><button id="btnAskNo" class="danger">無理です</button></div>' +
+      '<p class="muted">「無理です」を押すと、次の方に確認が移ります。引き受け手がいない場合は、その回は見送りになります。</p></div>';
+  }
+
   /* 確定後の操作 */
   if (d.date) {
     h += '<div class="card"><h2>開催が終わったら / 変更</h2><div class="actions">' +
       '<button id="btnDone">開催済みにする（担当の回数+1＆次の候補へ）</button>' +
       '<button id="btnSwap" class="ghost">担当を交代する（次点に繰り上げ）</button>' +
       '<button id="btnSkip" class="danger">この日は見送る</button></div>' +
-      '<p class="muted">担当の方が来れなくなった場合は、その方が自分の出欠を×に変えるだけでも自動で次点に繰り上がります。</p></div>';
+      '<p class="muted">担当の方が来れなくなった場合：開催まで1週間より前なら自動で次点に繰り上がります。1週間を切っている場合は次点の方にアプリで確認が届き、引き受け手がいなければその回は見送りになります。</p></div>';
   }
 
   /* メンバー一覧 */
@@ -265,7 +346,7 @@ function render() {
   let rank = 0;
   for (const m of sorted) {
     h += '<tr class="' + (m.active ? "" : "inactive") + (myId === m.id ? " me" : "") + '"><td>' + (m.active ? (++rank) : "—") + "</td><td>" +
-      esc(m.name) + (m.active ? "" : "（休止）") + (d.presenterId === m.id ? '<span class="tag">次回担当</span>' : "") + "</td><td>" + m.count + "回</td><td>" +
+      esc(m.name) + (m.active ? "" : "（休止）") + (d.presenterId === m.id ? '<span class="tag">次回担当</span>' : "") + (d.ask && d.ask.candidateId === m.id ? '<span class="tag">担当確認中</span>' : "") + "</td><td>" + m.count + "回</td><td>" +
       fmtDateShort(m.lastDate) + "</td><td>" + m.refCount + "回</td></tr>";
   }
   h += "</table></div>";
@@ -295,6 +376,8 @@ function render() {
     myId = e.target.value; localStorage.setItem("shodokai_me", myId); render();
   });
   app.querySelectorAll("[data-resp]").forEach(b => b.addEventListener("click", () => onRespond(b.dataset.date, b.dataset.resp)));
+  const ay = document.getElementById("btnAskYes"); if (ay) ay.addEventListener("click", onAskAccept);
+  const an = document.getElementById("btnAskNo"); if (an) an.addEventListener("click", onAskDecline);
   const bd = document.getElementById("btnDone"); if (bd) bd.addEventListener("click", onDone);
   const bs = document.getElementById("btnSwap"); if (bs) bs.addEventListener("click", onSwap);
   const bk = document.getElementById("btnSkip"); if (bk) bk.addEventListener("click", onSkip);
@@ -328,7 +411,7 @@ function onDone() {
     const keep = {};
     const newCands = nextTuesdays(d.date, 4);
     for (const id of Object.keys(S.round.responses)) { keep[id] = {}; for (const nd of newCands) if (S.round.responses[id][nd]) keep[id][nd] = S.round.responses[id][nd]; }
-    S.round = { seq: (S.round.seq || 1) + 1, candidates: newCands, responses: keep, excludedPresenters: [], decidedDate: null, decidedAt: null, presenterId: null, presenterDecidedAt: null };
+    S.round = { seq: (S.round.seq || 1) + 1, candidates: newCands, responses: keep, excludedPresenters: [], decidedDate: null, decidedAt: null, presenterId: null, presenterDecidedAt: null, ask: null, presenterOverride: null };
   }, "session completed");
 }
 function onSwap() {
@@ -339,6 +422,23 @@ function onSwap() {
     pushHistory("担当交代の操作が行われました（前担当：" + member(d.presenterId).name + "）");
   }, "presenter swap");
 }
+function onAskAccept() {
+  const r = S.round; if (!r.ask || r.ask.candidateId !== myId) return;
+  mutate(() => {
+    const cand = r.ask.candidateId;
+    r.presenterOverride = cand;
+    r.ask = null;
+    pushHistory("担当が " + member(cand).name + " さんに決まりました（急な交代の引き受け）");
+  }, "presenter accepted");
+}
+function onAskDecline() {
+  const r = S.round; if (!r.ask || r.ask.candidateId !== myId) return;
+  if (!confirm("今回は担当が難しい、で進めます。次の方に確認が移ります。よろしいですか？")) return;
+  mutate(() => {
+    pushHistory(member(myId).name + " さんは今回の担当が難しいとのことでした");
+    advanceAsk(true);
+  }, "presenter declined");
+}
 function onSkip() {
   const d = derive(); if (!d.date) return;
   if (!confirm(fmtDate(d.date) + " の開催を見送ります。候補日はその次の火曜日から組み直されます。よろしいですか？")) return;
@@ -347,7 +447,7 @@ function onSkip() {
     const keep = {};
     const newCands = nextTuesdays(d.date, 4);
     for (const id of Object.keys(S.round.responses)) { keep[id] = {}; for (const nd of newCands) if (S.round.responses[id][nd]) keep[id][nd] = S.round.responses[id][nd]; }
-    S.round = { seq: (S.round.seq || 1) + 1, candidates: newCands, responses: keep, excludedPresenters: [], decidedDate: null, decidedAt: null, presenterId: null, presenterDecidedAt: null };
+    S.round = { seq: (S.round.seq || 1) + 1, candidates: newCands, responses: keep, excludedPresenters: [], decidedDate: null, decidedAt: null, presenterId: null, presenterDecidedAt: null, ask: null, presenterOverride: null };
   }, "session skipped");
 }
 
@@ -357,10 +457,11 @@ async function boot() {
   try {
     await loadState();
     /* 読み込み時点の決定同期（変化があれば保存して履歴化） */
-    const before = JSON.stringify([S.round.decidedDate, S.round.presenterId]);
+    const snap = () => JSON.stringify([S.round.decidedDate, S.round.presenterId, S.round.ask ? S.round.ask.candidateId : null, S.round.seq]);
+    const before = snap();
     syncDecision(true);
     render();
-    if (JSON.stringify([S.round.decidedDate, S.round.presenterId]) !== before) {
+    if (snap() !== before) {
       try { await saveState("decision sync"); } catch (e) { /* 次回に持ち越し */ }
     }
   } catch (e) {
