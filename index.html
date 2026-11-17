@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>抄読会スケジューラー</title>
+<style>
+  :root { --main:#2563eb; --bg:#f6f7f9; --card:#fff; --line:#e2e5ea; --txt:#1a1d21; --sub:#6b7280; --ok:#16a34a; --ng:#dc2626; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; font-family:-apple-system,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif; background:var(--bg); color:var(--txt); font-size:15px; }
+  header { background:var(--main); color:#fff; padding:14px 16px; position:sticky; top:0; z-index:5; }
+  header h1 { margin:0; font-size:18px; }
+  header .save { font-size:12px; opacity:.85; margin-top:2px; min-height:15px; }
+  main { max-width:640px; margin:0 auto; padding:14px 12px 40px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:14px; }
+  .next { border:2px solid var(--main); }
+  .next .big { font-size:20px; font-weight:700; line-height:1.5; }
+  .next .presenter { color:var(--main); }
+  .muted { color:var(--sub); font-size:13px; }
+  h2 { font-size:15px; margin:0 0 10px; }
+  select { width:100%; font-size:16px; padding:10px; border:1px solid var(--line); border-radius:8px; background:#fff; }
+  .cand { border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:10px; }
+  .cand.decided { border-color:var(--main); background:#eff6ff; }
+  .cand .date { font-weight:700; font-size:16px; }
+  .cand .cnt { color:var(--main); font-weight:700; }
+  .btns { display:flex; gap:8px; margin-top:8px; }
+  .btns button { flex:1; font-size:16px; padding:10px 0; border-radius:8px; border:1px solid var(--line); background:#fff; cursor:pointer; }
+  .btns button.sel-yes { background:var(--ok); border-color:var(--ok); color:#fff; font-weight:700; }
+  .btns button.sel-no { background:var(--ng); border-color:var(--ng); color:#fff; font-weight:700; }
+  .grid { margin-top:8px; font-size:13px; color:var(--sub); line-height:1.7; word-break:break-all; }
+  .grid b { color:var(--txt); font-weight:600; }
+  .actions { display:flex; flex-direction:column; gap:8px; }
+  .actions button { font-size:15px; padding:12px; border-radius:8px; border:1px solid var(--main); background:var(--main); color:#fff; cursor:pointer; }
+  .actions button.ghost { background:#fff; color:var(--main); }
+  .actions button.danger { background:#fff; color:var(--ng); border-color:var(--ng); }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { padding:7px 4px; border-bottom:1px solid var(--line); text-align:left; }
+  th { color:var(--sub); font-weight:600; font-size:12px; }
+  tr.inactive { color:#9ca3af; }
+  tr.me td { background:#fffbeb; }
+  .tag { display:inline-block; font-size:11px; padding:1px 7px; border-radius:99px; background:#dbeafe; color:var(--main); margin-left:6px; }
+  ul.log { margin:0; padding-left:18px; font-size:13px; line-height:1.8; color:#374151; }
+  .setup { text-align:center; padding:30px 10px; }
+  .setup input { width:100%; font-size:14px; padding:10px; border:1px solid var(--line); border-radius:8px; margin:10px 0; }
+  .setup button { font-size:15px; padding:11px 22px; border-radius:8px; border:none; background:var(--main); color:#fff; cursor:pointer; }
+  .err { color:var(--ng); font-size:13px; margin-top:8px; white-space:pre-wrap; }
+  button:disabled { opacity:.5; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📚 抄読会スケジューラー</h1>
+  <div class="save" id="saveState"></div>
+</header>
+<main id="app"><p class="muted" style="text-align:center;padding:30px 0;">読み込み中…</p></main>
+
+<script>
+"use strict";
+/* ===== 設定 ===== */
+const OWNER = "shootingstarTTS7";
+const REPO  = "shodokai-scheduler";
+const FILE  = "state.json";
+const API   = "https://api.github.com/repos/" + OWNER + "/" + REPO + "/contents/" + FILE;
+const NEED  = 4;              // 開催に必要な○の人数
+const TIME_LABEL = "19:00–19:30";
+
+/* ===== キー管理（URLの #k= から取り込み、端末に記憶） ===== */
+let KEY = localStorage.getItem("shodokai_key") || "";
+(function(){
+  const m = location.hash.match(/k=([A-Za-z0-9_]+)/);
+  if (m) { KEY = m[1]; localStorage.setItem("shodokai_key", KEY); history.replaceState(null, "", location.pathname + location.search); }
+})();
+
+/* ===== 日付ユーティリティ（JST基準） ===== */
+function jstToday() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone:"Asia/Tokyo", year:"numeric", month:"2-digit", day:"2-digit" }).format(new Date());
+}
+function addDays(ymd, n) {
+  const d = new Date(ymd + "T00:00:00+09:00"); d.setDate(d.getDate() + n);
+  return new Intl.DateTimeFormat("en-CA", { timeZone:"Asia/Tokyo", year:"numeric", month:"2-digit", day:"2-digit" }).format(d);
+}
+function nextTuesdays(afterYmd, count) {
+  const out = []; let d = afterYmd;
+  while (out.length < count) {
+    d = addDays(d, 1);
+    const wd = new Date(d + "T00:00:00+09:00").getDay(); // JSTの曜日（+09:00固定）
+    if (wd === 2) out.push(d);
+  }
+  return out;
+}
+const WD = ["日","月","火","水","木","金","土"];
+function fmtDate(ymd) {
+  if (!ymd) return "—";
+  const d = new Date(ymd + "T00:00:00+09:00");
+  return (d.getMonth()+1) + "月" + d.getDate() + "日（" + WD[d.getDay()] + "）";
+}
+function fmtDateShort(ymd) {
+  if (!ymd) return "未担当";
+  const d = new Date(ymd + "T00:00:00+09:00");
+  return (d.getMonth()+1) + "/" + d.getDate();
+}
+
+/* ===== 状態 ===== */
+let S = null;        // state.json の内容
+let sha = null;      // GitHub上の版番号
+let saving = false;
+let myId = localStorage.getItem("shodokai_me") || "";
+
+function member(id){ return S.members.find(m => m.id === id); }
+function activeMembers(){ return S.members.filter(m => m.active); }
+function yesIds(date){
+  const r = S.round.responses || {};
+  return activeMembers().filter(m => r[m.id] && r[m.id][date] === "yes").map(m => m.id);
+}
+function priorityCmp(a, b){
+  if (a.count !== b.count) return a.count - b.count;
+  const la = a.lastDate || "0000-00-00", lb = b.lastDate || "0000-00-00";
+  if (la !== lb) return la < lb ? -1 : 1;
+  return a.yomi < b.yomi ? -1 : 1;
+}
+function pickPresenter(date, excluded){
+  const ys = yesIds(date).map(member).filter(m => !excluded.includes(m.id));
+  ys.sort(priorityCmp);
+  return ys.length ? ys[0].id : null;
+}
+/* 現在の決定を導出する（保存値ではなく常に再計算） */
+function derive(){
+  const r = S.round;
+  for (const date of r.candidates) {
+    if (yesIds(date).length >= NEED) {
+      const ex = (r.decidedDate === date) ? (r.excludedPresenters || []) : [];
+      return { date: date, presenterId: pickPresenter(date, ex), excluded: ex };
+    }
+  }
+  return { date: null, presenterId: null, excluded: [] };
+}
+
+/* ===== GitHub読み書き ===== */
+async function loadState() {
+  const res = await fetch(API, { headers: { "Authorization": "Bearer " + KEY, "Accept": "application/vnd.github+json" }, cache: "no-store" });
+  if (res.status === 401 || res.status === 403 || res.status === 404) throw new Error("key");
+  if (!res.ok) throw new Error("読み込みに失敗しました (" + res.status + ")");
+  const j = await res.json();
+  sha = j.sha;
+  S = JSON.parse(decodeURIComponent(escape(atob(j.content.replace(/\n/g, "")))));
+}
+async function saveState(message) {
+  const body = { message: message, content: btoa(unescape(encodeURIComponent(JSON.stringify(S, null, 2)))), sha: sha, branch: "main" };
+  const res = await fetch(API, { method: "PUT", headers: { "Authorization": "Bearer " + KEY, "Accept": "application/vnd.github+json", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (res.status === 409 || res.status === 422) throw new Error("conflict");
+  if (!res.ok) throw new Error("保存に失敗しました (" + res.status + ")");
+  const j = await res.json();
+  sha = j.content.sha;
+}
+/* 競合したら最新を取り直して1回だけやり直す */
+async function mutate(fn, message) {
+  if (saving) return;
+  saving = true; setSave("保存中…"); render();
+  try {
+    fn();
+    syncDecision(true);
+    await saveState(message);
+    setSave("保存しました ✓");
+  } catch (e) {
+    if (e.message === "conflict") {
+      try {
+        await loadState(); fn(); syncDecision(true);
+        await saveState(message);
+        setSave("保存しました ✓");
+      } catch (e2) { setSave(""); alert("他の人の更新と重なりました。画面を再読み込みしてからもう一度お試しください。"); }
+    } else { setSave(""); alert(e.message); }
+  }
+  saving = false; render();
+}
+/* 導出した決定と保存値を同期し、変化があれば履歴に残す（書き込みは呼び出し側） */
+function syncDecision(record) {
+  const d = derive();
+  const r = S.round;
+  const now = new Date().toISOString();
+  if (d.date !== r.decidedDate) {
+    if (record) pushHistory(d.date ? ("開催日が " + fmtDate(d.date) + " に自動確定しました") : "開催日の確定が取り消されました（出席4名未満）");
+    r.decidedDate = d.date; r.decidedAt = d.date ? now : null;
+    r.excludedPresenters = d.excluded;
+    r.presenterId = d.presenterId; r.presenterDecidedAt = d.presenterId ? now : null;
+    if (record && d.presenterId) pushHistory("担当が " + member(d.presenterId).name + " さんに自動決定しました");
+  } else if (d.presenterId !== r.presenterId) {
+    if (record && d.presenterId) pushHistory("担当が " + member(d.presenterId).name + " さんに自動で繰り上がりました");
+    r.presenterId = d.presenterId; r.presenterDecidedAt = d.presenterId ? now : null;
+  }
+}
+function pushHistory(text) {
+  S.history = S.history || [];
+  S.history.unshift({ at: new Date().toISOString(), text: text });
+  S.history = S.history.slice(0, 50);
+}
+function setSave(t){ document.getElementById("saveState").textContent = t; }
+
+/* ===== 描画 ===== */
+function esc(s){ return String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c])); }
+function render() {
+  const app = document.getElementById("app");
+  if (!KEY) { app.innerHTML = setupHtml(); return; }
+  if (!S) return;
+  const d = derive();
+  const r = S.round;
+  let h = "";
+
+  /* 次回カード */
+  h += '<div class="card next"><h2>次回の抄読会</h2>';
+  if (d.date) {
+    const att = yesIds(d.date).map(id => member(id).name);
+    h += '<div class="big">' + fmtDate(d.date) + " " + TIME_LABEL + "<br>担当：<span class='presenter'>" +
+         (d.presenterId ? esc(member(d.presenterId).name) + " さん" : "（未定）") + "</span></div>";
+    h += '<p class="muted">出席予定 ' + att.length + "名：" + att.map(esc).join("、") + "</p>";
+  } else {
+    h += '<div class="big">出欠を収集中です</div><p class="muted">○が' + NEED + '名以上集まった最初の火曜日が、自動で開催日に決まります。</p>';
+  }
+  h += "</div>";
+
+  /* 名前選択 */
+  h += '<div class="card"><h2>あなたの名前を選んでください</h2><select id="meSel"><option value="">（未選択）</option>';
+  for (const m of activeMembers()) h += '<option value="' + m.id + '"' + (myId === m.id ? " selected" : "") + ">" + esc(m.name) + "</option>";
+  h += "</select>";
+  if (!myId) h += '<p class="muted">名前を選ぶと、出欠（○/×）を入力できます。</p>';
+  h += "</div>";
+
+  /* 候補日 */
+  h += '<div class="card"><h2>候補日と出欠</h2>';
+  for (const date of r.candidates) {
+    const ys = yesIds(date);
+    const mine = myId && r.responses[myId] ? r.responses[myId][date] : undefined;
+    h += '<div class="cand' + (d.date === date ? " decided" : "") + '"><span class="date">' + fmtDate(date) + "</span> " + TIME_LABEL +
+         '　<span class="cnt">○ ' + ys.length + "名</span>" + (d.date === date ? '<span class="tag">開催決定</span>' : "") + "<br>";
+    h += '<span class="muted">○：' + (ys.length ? ys.map(id => esc(member(id).name)).join("、") : "まだいません") + "</span>";
+    if (myId) {
+      h += '<div class="btns"><button data-resp="yes" data-date="' + date + '" class="' + (mine === "yes" ? "sel-yes" : "") + '">○ 出席できる</button>' +
+           '<button data-resp="no" data-date="' + date + '" class="' + (mine === "no" ? "sel-no" : "") + '">× できない</button></div>';
+    }
+    h += '<div class="grid">' + activeMembers().map(m => {
+      const v = r.responses[m.id] ? r.responses[m.id][date] : undefined;
+      return "<b>" + esc(m.name) + "</b> " + (v === "yes" ? "○" : v === "no" ? "×" : "—");
+    }).join("　") + "</div>";
+    h += "</div>";
+  }
+  h += "</div>";
+
+  /* 確定後の操作 */
+  if (d.date) {
+    h += '<div class="card"><h2>開催が終わったら / 変更</h2><div class="actions">' +
+      '<button id="btnDone">開催済みにする（担当の回数+1＆次の候補へ）</button>' +
+      '<button id="btnSwap" class="ghost">担当を交代する（次点に繰り上げ）</button>' +
+      '<button id="btnSkip" class="danger">この日は見送る</button></div>' +
+      '<p class="muted">担当の方が来れなくなった場合は、その方が自分の出欠を×に変えるだけでも自動で次点に繰り上がります。</p></div>';
+  }
+
+  /* メンバー一覧 */
+  const sorted = [...S.members].sort((a, b) => (a.active === b.active) ? priorityCmp(a, b) : (a.active ? -1 : 1));
+  h += '<div class="card"><h2>メンバー（次回担当の目安順）</h2><table><tr><th>順</th><th>名前</th><th>担当回数</th><th>直近担当</th><th>参考:直近1年</th></tr>';
+  let rank = 0;
+  for (const m of sorted) {
+    h += '<tr class="' + (m.active ? "" : "inactive") + (myId === m.id ? " me" : "") + '"><td>' + (m.active ? (++rank) : "—") + "</td><td>" +
+      esc(m.name) + (m.active ? "" : "（休止）") + (d.presenterId === m.id ? '<span class="tag">次回担当</span>' : "") + "</td><td>" + m.count + "回</td><td>" +
+      fmtDateShort(m.lastDate) + "</td><td>" + m.refCount + "回</td></tr>";
+  }
+  h += "</table></div>";
+
+  /* 開催ログ */
+  if (S.sessions && S.sessions.length) {
+    h += '<div class="card"><h2>開催ログ</h2><ul class="log">';
+    for (const s of [...S.sessions].reverse()) {
+      h += "<li>" + fmtDate(s.date) + "　担当：" + esc(member(s.presenterId) ? member(s.presenterId).name : "?") +
+           "　出席" + s.attendees.length + "名（" + s.attendees.map(id => member(id) ? esc(member(id).name) : "?").join("、") + "）</li>";
+    }
+    h += "</ul></div>";
+  }
+  /* 変更履歴 */
+  if (S.history && S.history.length) {
+    h += '<div class="card"><h2>最近の変更</h2><ul class="log">';
+    for (const ev of S.history.slice(0, 10)) {
+      const t = new Date(ev.at);
+      h += "<li>" + (t.getMonth()+1) + "/" + t.getDate() + " " + String(t.getHours()).padStart(2,"0") + ":" + String(t.getMinutes()).padStart(2,"0") + "　" + esc(ev.text) + "</li>";
+    }
+    h += "</ul></div>";
+  }
+  h += '<p class="muted" style="text-align:center;">出欠はいつでも変更できます（前日・当日でもOK）。<br>変更は全員に自動で反映されます。</p>';
+  app.innerHTML = h;
+
+  document.getElementById("meSel").addEventListener("change", e => {
+    myId = e.target.value; localStorage.setItem("shodokai_me", myId); render();
+  });
+  app.querySelectorAll("[data-resp]").forEach(b => b.addEventListener("click", () => onRespond(b.dataset.date, b.dataset.resp)));
+  const bd = document.getElementById("btnDone"); if (bd) bd.addEventListener("click", onDone);
+  const bs = document.getElementById("btnSwap"); if (bs) bs.addEventListener("click", onSwap);
+  const bk = document.getElementById("btnSkip"); if (bk) bk.addEventListener("click", onSkip);
+}
+function setupHtml() {
+  return '<div class="card setup"><h2>アクセスキーの設定</h2>' +
+    '<p class="muted">このアプリは抄読会メンバー専用です。<br>LINEグループで案内されたリンクから開くと自動で設定されます。<br>キーを直接入力する場合はこちら：</p>' +
+    '<input id="keyIn" placeholder="アクセスキーを貼り付け" autocomplete="off"><br>' +
+    '<button id="keyBtn">設定する</button><div class="err" id="keyErr"></div></div>';
+}
+
+/* ===== 操作 ===== */
+function onRespond(date, val) {
+  if (!myId) { alert("先に名前を選んでください"); return; }
+  mutate(() => {
+    S.round.responses[myId] = S.round.responses[myId] || {};
+    const cur = S.round.responses[myId][date];
+    S.round.responses[myId][date] = (cur === val) ? undefined : val;
+    if (S.round.responses[myId][date] === undefined) delete S.round.responses[myId][date];
+    pushHistory(member(myId).name + " さんが " + fmtDate(date) + " を " + (S.round.responses[myId][date] === "yes" ? "○" : S.round.responses[myId][date] === "no" ? "×" : "未回答") + " にしました");
+  }, "response update");
+}
+function onDone() {
+  const d = derive(); if (!d.date) return;
+  if (!confirm(fmtDate(d.date) + " の抄読会を「開催済み」にします。担当の " + (d.presenterId ? member(d.presenterId).name : "") + " さんの回数が+1され、次の候補日が表示されます。よろしいですか？")) return;
+  mutate(() => {
+    const att = yesIds(d.date);
+    S.sessions.push({ date: d.date, presenterId: d.presenterId, attendees: att });
+    if (d.presenterId) { const p = member(d.presenterId); p.count += 1; p.lastDate = d.date; }
+    pushHistory(fmtDate(d.date) + " の抄読会を開催済みにしました（担当：" + (d.presenterId ? member(d.presenterId).name : "?") + "）");
+    const keep = {};
+    const newCands = nextTuesdays(d.date, 4);
+    for (const id of Object.keys(S.round.responses)) { keep[id] = {}; for (const nd of newCands) if (S.round.responses[id][nd]) keep[id][nd] = S.round.responses[id][nd]; }
+    S.round = { seq: (S.round.seq || 1) + 1, candidates: newCands, responses: keep, excludedPresenters: [], decidedDate: null, decidedAt: null, presenterId: null, presenterDecidedAt: null };
+  }, "session completed");
+}
+function onSwap() {
+  const d = derive(); if (!d.date || !d.presenterId) return;
+  if (!confirm("担当を " + member(d.presenterId).name + " さんから次点の方に交代します。よろしいですか？")) return;
+  mutate(() => {
+    S.round.excludedPresenters = [...(S.round.excludedPresenters || []), d.presenterId];
+    pushHistory("担当交代の操作が行われました（前担当：" + member(d.presenterId).name + "）");
+  }, "presenter swap");
+}
+function onSkip() {
+  const d = derive(); if (!d.date) return;
+  if (!confirm(fmtDate(d.date) + " の開催を見送ります。候補日はその次の火曜日から組み直されます。よろしいですか？")) return;
+  mutate(() => {
+    pushHistory(fmtDate(d.date) + " の開催が見送られました");
+    const keep = {};
+    const newCands = nextTuesdays(d.date, 4);
+    for (const id of Object.keys(S.round.responses)) { keep[id] = {}; for (const nd of newCands) if (S.round.responses[id][nd]) keep[id][nd] = S.round.responses[id][nd]; }
+    S.round = { seq: (S.round.seq || 1) + 1, candidates: newCands, responses: keep, excludedPresenters: [], decidedDate: null, decidedAt: null, presenterId: null, presenterDecidedAt: null };
+  }, "session skipped");
+}
+
+/* ===== 起動 ===== */
+async function boot() {
+  if (!KEY) { render(); bindSetup(); return; }
+  try {
+    await loadState();
+    /* 読み込み時点の決定同期（変化があれば保存して履歴化） */
+    const before = JSON.stringify([S.round.decidedDate, S.round.presenterId]);
+    syncDecision(true);
+    render();
+    if (JSON.stringify([S.round.decidedDate, S.round.presenterId]) !== before) {
+      try { await saveState("decision sync"); } catch (e) { /* 次回に持ち越し */ }
+    }
+  } catch (e) {
+    if (e.message === "key") {
+      document.getElementById("app").innerHTML = setupHtml();
+      document.getElementById("keyErr").textContent = "キーが違うか、権限がありません。LINEで案内されたリンクから開き直してください。";
+      bindSetup();
+    } else {
+      document.getElementById("app").innerHTML = '<div class="card setup"><p>読み込みに失敗しました。</p><p class="muted">' + esc(e.message) + '</p><button onclick="location.reload()">再読み込み</button></div>';
+    }
+  }
+}
+function bindSetup() {
+  const b = document.getElementById("keyBtn");
+  if (b) b.addEventListener("click", () => {
+    const v = document.getElementById("keyIn").value.trim();
+    if (v) { KEY = v; localStorage.setItem("shodokai_key", KEY); boot(); }
+  });
+}
+boot();
+/* 他の人の変更を定期的に取り込む */
+setInterval(async () => {
+  if (!KEY || saving || document.hidden) return;
+  try { await loadState(); syncDecision(false); render(); } catch (e) { /* 静かに失敗 */ }
+}, 30000);
+</script>
+</body>
+</html>
