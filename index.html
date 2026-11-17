@@ -39,6 +39,7 @@
   tr.inactive { color:#9ca3af; }
   tr.me td { background:#fffbeb; }
   .tag { display:inline-block; font-size:11px; padding:1px 7px; border-radius:99px; background:#dbeafe; color:var(--main); margin-left:6px; }
+  .gcal { display:inline-block; padding:8px 14px; border:1px solid #c7d2fe; border-radius:8px; background:#eef2ff; color:var(--main); text-decoration:none; font-weight:600; }
   ul.log { margin:0; padding-left:18px; font-size:13px; line-height:1.8; color:#374151; }
   .setup { text-align:center; padding:30px 10px; }
   .setup input { width:100%; font-size:14px; padding:10px; border:1px solid var(--line); border-radius:8px; margin:10px 0; }
@@ -212,6 +213,11 @@ function render() {
     h += '<div class="big">' + fmtDate(d.date) + " " + TIME_LABEL + "<br>担当：<span class='presenter'>" +
          (d.presenterId ? esc(member(d.presenterId).name) + " さん" : "（未定）") + "</span></div>";
     h += '<p class="muted">出席予定 ' + att.length + "名：" + att.map(esc).join("、") + "</p>";
+    const pName = d.presenterId ? member(d.presenterId).name + " さん" : "（未定）";
+    const gUrl = "https://calendar.google.com/calendar/render?action=TEMPLATE&text=" + encodeURIComponent("抄読会") +
+      "&dates=" + d.date.replace(/-/g, "") + "T100000Z/" + d.date.replace(/-/g, "") + "T103000Z" +
+      "&details=" + encodeURIComponent("担当：" + pName + "\n出欠の変更はアプリからお願いします");
+    h += '<p><a class="gcal" href="' + gUrl + '" target="_blank" rel="noopener">📅 Googleカレンダーに追加</a></p>';
   } else {
     h += '<div class="big">出欠を収集中です</div><p class="muted">○が' + NEED + '名以上集まった最初の火曜日が、自動で開催日に決まります。</p>';
   }
