@@ -8,9 +8,14 @@
   :root { --main:#4f46e5; --main2:#7c3aed; --bg:#f3f4fa; --card:#fff; --line:#e6e7f0; --txt:#171a26; --sub:#6d7280; --ok:#16a34a; --ng:#dc2626; --shadow:0 8px 28px rgba(23,26,38,.07); }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif; background:linear-gradient(180deg,#e9ebff 0,#f3f4fa 300px); background-color:var(--bg); color:var(--txt); font-size:15px; line-height:1.55; }
-  header { background:linear-gradient(135deg,#4f46e5,#7c3aed 60%,#9333ea); color:#fff; padding:18px 16px 16px; position:sticky; top:0; z-index:5; border-radius:0 0 20px 20px; box-shadow:0 6px 22px rgba(79,70,229,.35); }
-  header h1 { margin:0; font-size:19px; font-weight:800; letter-spacing:.02em; }
-  header .save { font-size:12px; opacity:.9; margin-top:2px; min-height:15px; }
+  header { background:linear-gradient(120deg,#0b1026 0%,#1b1140 55%,#2a1065 100%); color:#fff; padding:16px 16px 14px; position:sticky; top:0; z-index:5; border-radius:0 0 22px 22px; box-shadow:0 10px 30px rgba(11,16,38,.45); overflow:hidden; }
+  header::before { content:""; position:absolute; top:-70px; right:-50px; width:200px; height:200px; border-radius:50%; background:radial-gradient(circle,rgba(99,102,241,.55),transparent 70%); }
+  header::after { content:""; position:absolute; left:0; right:0; bottom:0; height:3px; background:linear-gradient(90deg,#22d3ee,#818cf8,#e879f9,#fbbf24); }
+  header .brand { display:flex; align-items:center; gap:12px; position:relative; z-index:1; }
+  header .logo { width:46px; height:46px; flex:none; display:flex; align-items:center; justify-content:center; font-size:23px; border-radius:14px; background:linear-gradient(135deg,#6366f1,#a855f7 60%,#ec4899); box-shadow:0 6px 18px rgba(168,85,247,.55), inset 0 1px 0 rgba(255,255,255,.35); }
+  header h1 { margin:0; font-size:21px; font-weight:900; letter-spacing:.03em; line-height:1.25; }
+  header .sub { font-size:9.5px; font-weight:700; letter-spacing:.32em; color:rgba(255,255,255,.55); margin-top:2px; }
+  header .save { font-size:12px; opacity:.95; margin-top:8px; min-height:15px; color:#c7d2fe; position:relative; z-index:1; }
   main { max-width:640px; margin:0 auto; padding:16px 12px 44px; }
   .card { background:var(--card); border:1px solid rgba(23,26,38,.05); border-radius:18px; box-shadow:var(--shadow); padding:18px 16px; margin-bottom:16px; }
   .card h2 { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:700; color:var(--sub); letter-spacing:.07em; margin:0 0 12px; }
@@ -61,7 +66,13 @@
 </head>
 <body>
 <header>
-  <h1>📚 抄読会スケジューラー</h1>
+  <div class="brand">
+    <div class="logo">📚</div>
+    <div>
+      <h1>抄読会スケジューラー</h1>
+      <div class="sub">JOURNAL CLUB SCHEDULER</div>
+    </div>
+  </div>
   <div class="save" id="saveState"></div>
 </header>
 <main id="app"><p class="muted" style="text-align:center;padding:30px 0;">読み込み中…</p></main>
