@@ -109,7 +109,7 @@ const REPO  = "shodokai-scheduler";
 const FILE  = "state.json";
 const API   = "https://api.github.com/repos/" + OWNER + "/" + REPO + "/contents/" + FILE;
 const NEED  = 4;              // 開催に必要な○の人数
-const WINDOW = 6;             // v3: 表示する候補週の数
+const WINDOW = 4;             // v3: 表示する候補週の数（1週終わるごとに末尾へ1週足す。有馬の指示 2026-11-18）
 const TIME_LABEL = "19:00–19:30";
 
 /* ===== キー管理（URLの #k= から取り込み、端末に記憶） ===== */
