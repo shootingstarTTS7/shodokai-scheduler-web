@@ -267,30 +267,10 @@ function completeSession(d) {
   pushHistory(fmtDate(d.date) + " の抄読会を開催済みにしました（担当：" + (d.presenterId ? member(d.presenterId).name : "?") + "）");
   S.round = buildNextRound(S.round, d.date);
 }
-/* 担当の確認を次の候補へ進める（候補が尽きたらその回は見送り） */
-function advanceAsk(record) {
+/* 開催まで1週間を切って担当が来れなくなったため、その週を休会にする */
+function cancelRoundKyukai(record, date, oldId) {
   const r = S.round;
-  const ask = r.ask;
-  if (!ask) return;
-  const prev = ask.candidateId;
-  if (prev) {
-    if (!ask.declined.includes(prev)) ask.declined.push(prev);
-    r.excludedPresenters = [...(r.excludedPresenters || [])];
-    if (!r.excludedPresenters.includes(prev)) r.excludedPresenters.push(prev);
-  }
-  const next = pickPresenter(ask.forDate, r.excludedPresenters || []);
-  if (next) {
-    ask.candidateId = next;
-    if (record) pushHistory("次は " + member(next).name + " さんに担当を確認中です");
-  } else {
-    cancelRoundNoPresenter(record);
-  }
-}
-/* 担当を引き受けられる方がいないため、その回を見送る */
-function cancelRoundNoPresenter(record) {
-  const r = S.round;
-  const date = (r.ask && r.ask.forDate) || r.decidedDate;
-  if (record && date) pushHistory(fmtDate(date) + " の抄読会は、担当を引き受けられる方がいなかったため見送りになりました");
+  if (record && date) pushHistory(fmtDate(date) + " の抄読会は、担当の " + (oldId ? member(oldId).name + " さんが来れなくなり、" : "") + "開催まで1週間を切っているため休会になりました", "kyukai");
   S.round = buildNextRound(r, date);
 }
 /* 導出した決定と保存値を同期し、変化があれば履歴に残す（書き込みは呼び出し側） */
@@ -318,31 +298,19 @@ function syncDecision(record) {
     return;
   }
   if (!d.date) return;
-  /* 同じ開催日のまま、担当まわりに変化があった場合 */
-  if (r.ask) {
-    const cand = r.ask.candidateId;
-    if (cand && !yesIds(d.date).includes(cand)) {
-      if (record) pushHistory(member(cand).name + " さんが " + fmtDate(d.date) + " の出欠を×にしたため、担当の確認を次へ進めます");
-      advanceAsk(record);
-      if (S.round !== r) return;
-    }
-    r.presenterId = derive().presenterId;
-    return;
-  }
+  /* 同じ開催日のまま、担当まわりに変化があった場合。
+     担当への確認フロー（ask）は 2026-11-18 の有馬の指示で廃止し、7日ルールに一本化した:
+     担当が来れなくなった場合、開催まで1週間以上あれば次点へ自動繰り上げ、1週間を切っていればその週は休会 */
+  r.ask = null;
   if (d.presenterId !== r.presenterId) {
     const old = r.presenterId;
     const oldDropped = old && (!yesIds(d.date).includes(old) || (r.excludedPresenters || []).includes(old));
     if (old && oldDropped && daysUntil(d.date) <= 7) {
-      /* 開催まで1週間以内の担当欠席 → 自動繰り上げせず、次点に確認する */
-      r.ask = { forDate: d.date, candidateId: d.presenterId, declined: [], droppedId: old, since: now };
-      r.presenterId = null; r.presenterDecidedAt = null;
-      if (record) pushHistory(fmtDate(d.date) + " の担当だった " + member(old).name + " さんが来れなくなりました。開催まで1週間を切っているため、自動では決めず次点の方に確認します");
-      if (d.presenterId) { if (record) pushHistory("次は " + member(d.presenterId).name + " さんに担当を確認中です"); }
-      else cancelRoundNoPresenter(record);
-    } else {
-      if (record && d.presenterId && old) pushHistory("担当が " + member(d.presenterId).name + " さんに自動で繰り上がりました");
-      r.presenterId = d.presenterId; r.presenterDecidedAt = d.presenterId ? now : null;
+      cancelRoundKyukai(record, d.date, old);
+      return;
     }
+    if (record && d.presenterId && old) pushHistory("担当が " + member(d.presenterId).name + " さんに自動で繰り上がりました");
+    r.presenterId = d.presenterId; r.presenterDecidedAt = d.presenterId ? now : null;
   }
 }
 function pushHistory(text, kind) {
@@ -416,9 +384,9 @@ function render() {
       h += '<p class="muted" style="margin:6px 0 0;">○は揃っています。開催の決定は、全員の回答が揃った時点（遅くとも最初の候補日の前日）です</p>';
     }
     if (myId) {
-      h += '<div class="btns"><button data-resp="yes" data-date="' + date + '" class="' + (mine === "yes" ? "sel-yes" : "") + '">○ 出席できる</button>';
-      h += '<button data-resp="maybe" data-date="' + date + '" class="' + (mine === "maybe" ? "sel-maybe" : "") + '">？ わからない</button>';
-      h += '<button data-resp="no" data-date="' + date + '" class="' + (mine === "no" ? "sel-no" : "") + '">× できない</button></div>';
+      h += '<div class="btns"><button data-resp="yes" data-date="' + date + '" class="' + (mine === "yes" ? "sel-yes" : "") + '">○ 出席する</button>';
+      h += '<button data-resp="maybe" data-date="' + date + '" class="' + (mine === "maybe" ? "sel-maybe" : "") + '">？ 分からない</button>';
+      h += '<button data-resp="no" data-date="' + date + '" class="' + (mine === "no" ? "sel-no" : "") + '">× 出席しない</button></div>';
     }
     h += '<div class="grid">' + activeMembers().map(m => {
       const v = r.responses[m.id] ? r.responses[m.id][date] : undefined;
@@ -428,23 +396,15 @@ function render() {
   }
   h += "</div>";
 
-  /* 担当確認カード（自分が確認対象のとき） */
-  if (d.ask && myId && d.ask.candidateId === myId) {
-    const dropped = d.ask.droppedId && member(d.ask.droppedId) ? member(d.ask.droppedId).name : "";
-    h += '<div class="card ask"><h2>急な担当のお願い🙏</h2>' +
-      '<p>' + fmtDate(d.ask.forDate) + ' の担当だった ' + esc(dropped) + ' さんが来れなくなりました。<br>次点はあなたです。担当を引き受けられますか？</p>' +
-      '<div class="actions"><button id="btnAskYes">引き受ける</button><button id="btnAskNo" class="danger">無理です</button></div>' +
-      '<p class="muted">「無理です」を押すと、次の方に確認が移ります。引き受け手がいない場合は、その回は流会になります。</p></div>';
-  }
-
   /* 確定後の操作（対象の開催日を明示する） */
   if (d.date) {
     h += '<div class="card"><h2>' + fmtDate(d.date) + ' 19:00 の回について</h2>' +
       '<p class="muted" style="margin:0 0 10px;">下のボタンはすべて ' + fmtDate(d.date) + ' の回への操作です。</p><div class="actions">';
     /* 「開催済み」ボタンは全ラウンドで廃止（開催実施はカレンダーで自動判定する。有馬の指示 2026-11-18）。
-       担当の手動交代も行わない（欠席は自動繰り上げ／確認フローで処理する）。残す操作は流会のみ。 */
-    h += '<button id="btnSkip" class="danger">この日は流会にする</button></div>' +
-      '<p class="muted">' + fmtDate(d.date) + ' の担当の方が来れなくなった場合：' + fmtDate(d.date) + ' まで1週間より前なら、自動で次点の方に繰り上がります。1週間を切っている場合は次点の方にアプリで確認が届き、引き受け手がいなければ ' + fmtDate(d.date) + ' の回は流会になります。</p></div>';
+       残す操作は担当の手動交代と流会のみ。 */
+    h += '<button id="btnSwap" class="ghost">担当を交代する（次点に繰り上げ）</button>' +
+      '<button id="btnSkip" class="danger">この日は流会にする</button></div>' +
+      '<p class="muted">' + fmtDate(d.date) + ' の担当の方が来れなくなった場合：開催まで1週間以上ある場合は、自動で次点の方に交代します。1週間を切っている場合は、その週は休会になります。</p></div>';
   }
 
   /* メンバー一覧 */
@@ -483,8 +443,6 @@ function render() {
     myId = e.target.value; localStorage.setItem("shodokai_me", myId); render();
   });
   app.querySelectorAll("[data-resp]").forEach(b => b.addEventListener("click", () => onRespond(b.dataset.date, b.dataset.resp)));
-  const ay = document.getElementById("btnAskYes"); if (ay) ay.addEventListener("click", onAskAccept);
-  const an = document.getElementById("btnAskNo"); if (an) an.addEventListener("click", onAskDecline);
   const bd = document.getElementById("btnDone"); if (bd) bd.addEventListener("click", onDone);
   const bs = document.getElementById("btnSwap"); if (bs) bs.addEventListener("click", onSwap);
   const bk = document.getElementById("btnSkip"); if (bk) bk.addEventListener("click", onSkip);
@@ -515,34 +473,19 @@ function onDone() {
 }
 function onSwap() {
   const d = derive(); if (!d.date || !d.presenterId) return;
-  if (!confirm("担当を " + member(d.presenterId).name + " さんから次点の方に交代します。よろしいですか？")) return;
+  if (daysUntil(d.date) <= 7) {
+    if (!confirm(fmtDate(d.date) + " は開催まで1週間を切っています。担当が来れない場合、その週は休会になります。休会にしてよろしいですか？")) return;
+  } else if (!confirm("担当を " + member(d.presenterId).name + " さんから次点の方に交代します。よろしいですか？")) return;
   mutate(() => {
     S.round.excludedPresenters = [...(S.round.excludedPresenters || []), d.presenterId];
     pushHistory("担当交代の操作が行われました（前担当：" + member(d.presenterId).name + "）");
   }, "presenter swap");
 }
-function onAskAccept() {
-  const r = S.round; if (!r.ask || r.ask.candidateId !== myId) return;
-  mutate(() => {
-    const cand = r.ask.candidateId;
-    r.presenterOverride = cand;
-    r.ask = null;
-    pushHistory("担当が " + member(cand).name + " さんに決まりました（急な交代の引き受け）");
-  }, "presenter accepted");
-}
-function onAskDecline() {
-  const r = S.round; if (!r.ask || r.ask.candidateId !== myId) return;
-  if (!confirm("今回は担当が難しい、で進めます。次の方に確認が移ります。よろしいですか？")) return;
-  mutate(() => {
-    pushHistory(member(myId).name + " さんは今回の担当が難しいとのことでした");
-    advanceAsk(true);
-  }, "presenter declined");
-}
 function onSkip() {
   const d = derive(); if (!d.date) return;
-  if (!confirm(fmtDate(d.date) + " の開催を見送ります。候補日はその次の火曜日から組み直されます。よろしいですか？")) return;
+  if (!confirm(fmtDate(d.date) + " の開催を流会にします。候補日はその次の火曜日から組み直されます。よろしいですか？")) return;
   mutate(() => {
-    pushHistory(fmtDate(d.date) + " の開催が見送られました");
+    pushHistory(fmtDate(d.date) + " の開催が流会になりました");
     S.round = buildNextRound(S.round, d.date);
   }, "session skipped");
 }
