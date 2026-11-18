@@ -32,6 +32,8 @@
   select { width:100%; font-size:16px; font-weight:600; padding:12px; border:1px solid var(--line); border-radius:12px; background:#f8f9ff; color:var(--txt); }
   .cand { border:1px solid var(--line); border-radius:14px; padding:13px 14px; margin-bottom:10px; background:#fcfcff; }
   .cand.decided { border-color:#c7d2fe; background:linear-gradient(180deg,#eef2ff,#f5f7ff); box-shadow:inset 0 0 0 1px #c7d2fe; }
+  .cand.dead { opacity:.55; background:#f8fafc; }
+  .tag-dead { background:#e2e8f0; color:#475569; }
   .cand .date { font-weight:800; font-size:17px; }
   .cand .cnt { background:#eef2ff; color:var(--main); font-weight:700; padding:2px 10px; border-radius:99px; font-size:13px; }
   .bar { height:8px; background:#e7e8f2; border-radius:99px; overflow:hidden; margin-top:10px; }
@@ -142,6 +144,18 @@ function yesIds(date){
 function maybeIds(date){
   const r = S.round.responses || {};
   return activeMembers().filter(m => r[m.id] && r[m.id][date] === "maybe").map(m => m.id);
+}
+/* その候補日が開催不可能か: ○になれる上限（○+？+未回答の現役メンバー数）が NEED 未満なら、
+   残り全員が○でも開催人数に届かない（現役9名なら ×が6名になった時点で確定する）。
+   2026-11-18 有馬の指示で追加 */
+function dateImpossible(date){
+  const resp = S.round.responses || {};
+  let potential = 0;
+  for (const m of activeMembers()) {
+    const v = resp[m.id] && resp[m.id][date];
+    if (v !== "no") potential++;
+  }
+  return potential < NEED;
 }
 /* 担当の優先順位: 担当回数が少ない順 → 前回担当から空いている順 → 五十音順。
    回数の基準は全ルール共通で count（直近3ヶ月）。refCount（直近1年）は参考表示のみ。
@@ -275,6 +289,23 @@ function cancelRoundKyukai(record, date, oldId) {
 }
 /* 導出した決定と保存値を同期し、変化があれば履歴に残す（書き込みは呼び出し側） */
 function syncDecision(record) {
+  const r0 = S.round;
+  /* v2・未決定ラウンド: 開催人数に届く見込みがなくなった候補日は、その時点で流会として確定させる
+     （一度流会にした日は、後から回答が変わっても戻さない）。全候補日が流会なら回ごと見送りにして組み直す */
+  if (r0.rules === "v2" && !r0.decidedDate) {
+    r0.deadDates = r0.deadDates || [];
+    for (const date of r0.candidates) {
+      if (!r0.deadDates.includes(date) && dateImpossible(date)) {
+        r0.deadDates.push(date);
+        if (record) pushHistory(fmtDate(date) + " は、出席できる方が" + NEED + "名に届かなくなったため流会になりました", "dead");
+      }
+    }
+    if (r0.candidates.length && r0.candidates.every(dt => r0.deadDates.includes(dt))) {
+      if (record) pushHistory("全ての候補日が流会になったため、この回は見送りになりました（次回候補日に組み直しました）", "skip");
+      S.round = buildNextRound(r0, r0.candidates[r0.candidates.length - 1]);
+      return;
+    }
+  }
   const d = derive();
   const r = S.round;
   const now = new Date().toISOString();
@@ -370,20 +401,23 @@ function render() {
   for (const date of r.candidates) {
     const ys = yesIds(date);
     const mb = maybeIds(date);
+    const dead = (r.deadDates || []).includes(date);
     const mine = myId && r.responses[myId] ? r.responses[myId][date] : undefined;
-    h += '<div class="cand' + (d.date === date ? " decided" : "") + '"><span class="date">' + fmtDate(date) + "</span> " + TIME_LABEL +
+    h += '<div class="cand' + (d.date === date ? " decided" : "") + (dead ? " dead" : "") + '"><span class="date">' + fmtDate(date) + "</span> " + TIME_LABEL +
          '　<span class="cnt">○ ' + ys.length + "名</span>" +
          (mb.length ? '　<span class="cnt" style="background:#fef3c7;color:#92400e;">？ ' + mb.length + "名</span>" : "") +
-         (d.date === date ? '<span class="tag">開催決定</span>' : "") + "<br>";
+         (d.date === date ? '<span class="tag">開催決定</span>' : "") + (dead ? '<span class="tag tag-dead">流会</span>' : "") + "<br>";
     h += '<span class="muted">○：' + (ys.length ? ys.map(id => esc(member(id).name)).join("、") : "まだいません") + "</span>";
     if (mb.length) h += '<br><span class="muted">？：' + mb.map(id => esc(member(id).name)).join("、") + "</span>";
     h += '<div class="bar"><i style="width:' + Math.min(100, Math.round(ys.length / NEED * 100)) + '%"></i></div>';
-    if (d.date !== date && ys.length < NEED) {
+    if (dead) {
+      h += '<p class="muted" style="margin:6px 0 0;">出席できる方が' + NEED + '名に届かなくなったため、この日は流会になりました</p>';
+    } else if (d.date !== date && ys.length < NEED) {
       h += '<p class="muted" style="margin:6px 0 0;">' + (isV2() ? '開催にはあと ' + (NEED - ys.length) + ' 名の○が必要です' : 'あと ' + (NEED - ys.length) + ' 名の○で開催決定です') + '</p>';
     } else if (isV2() && d.date !== date && !r.decidedDate) {
       h += '<p class="muted" style="margin:6px 0 0;">○は揃っています。開催の決定は、全員の回答が揃った時点（遅くとも最初の候補日の前日）です</p>';
     }
-    if (myId) {
+    if (myId && !dead) {
       h += '<div class="btns"><button data-resp="yes" data-date="' + date + '" class="' + (mine === "yes" ? "sel-yes" : "") + '">○ 出席する</button>';
       h += '<button data-resp="maybe" data-date="' + date + '" class="' + (mine === "maybe" ? "sel-maybe" : "") + '">？ 分からない</button>';
       h += '<button data-resp="no" data-date="' + date + '" class="' + (mine === "no" ? "sel-no" : "") + '">× 出席しない</button></div>';
@@ -496,7 +530,7 @@ async function boot() {
   try {
     await loadState();
     /* 読み込み時点の決定同期（変化があれば保存して履歴化） */
-    const snap = () => JSON.stringify([S.round.decidedDate, S.round.presenterId, S.round.ask ? S.round.ask.candidateId : null, S.round.seq]);
+    const snap = () => JSON.stringify([S.round.decidedDate, S.round.presenterId, S.round.ask ? S.round.ask.candidateId : null, S.round.seq, (S.round.deadDates || []).join(",")]);
     const before = snap();
     syncDecision(true);
     render();
