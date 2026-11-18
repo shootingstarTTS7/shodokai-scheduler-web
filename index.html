@@ -55,6 +55,7 @@
   .tag { display:inline-block; font-size:11px; font-weight:700; padding:2px 9px; border-radius:99px; background:linear-gradient(135deg,#e0e7ff,#ede9fe); color:var(--main); margin-left:6px; }
   .gcal { display:inline-block; padding:9px 16px; border:1px solid #c7d2fe; border-radius:99px; background:#eef2ff; color:var(--main); text-decoration:none; font-weight:700; }
   .card.ask { border:2px solid #f59e0b; background:linear-gradient(180deg,#fffbeb,#fff7e0); }
+  .banner-change { background:linear-gradient(135deg,#f59e0b,#f97316 55%,#ef4444); color:#fff; font-weight:800; font-size:16px; line-height:1.5; border-radius:18px; box-shadow:0 8px 24px rgba(249,115,22,.35); padding:14px 16px; margin-bottom:16px; text-align:center; }
   ul.log { margin:0; padding-left:18px; font-size:13px; line-height:1.8; color:#374151; }
   ul.log li::marker { color:var(--main); }
   .setup { text-align:center; padding:30px 10px; }
@@ -245,7 +246,11 @@ function syncDecision(record) {
   const r = S.round;
   const now = new Date().toISOString();
   if (d.date !== r.decidedDate) {
-    if (record) pushHistory(d.date ? ("開催日が " + fmtDate(d.date) + " に自動確定しました") : "開催日の確定が取り消されました（出席4名未満）");
+    if (record) {
+      if (d.date && r.decidedDate) pushHistory("開催日が変更になりました：" + fmtDate(r.decidedDate) + " → " + fmtDate(d.date), "datechange");
+      else if (d.date) pushHistory("開催日が " + fmtDate(d.date) + " に自動確定しました");
+      else pushHistory("開催日の確定が取り消されました（出席4名未満）");
+    }
     r.decidedDate = d.date; r.decidedAt = d.date ? now : null;
     r.excludedPresenters = d.excluded;
     r.presenterId = d.presenterId; r.presenterDecidedAt = d.presenterId ? now : null;
@@ -281,9 +286,11 @@ function syncDecision(record) {
     }
   }
 }
-function pushHistory(text) {
+function pushHistory(text, kind) {
   S.history = S.history || [];
-  S.history.unshift({ at: new Date().toISOString(), text: text });
+  const entry = { at: new Date().toISOString(), text: text };
+  if (kind) entry.kind = kind;
+  S.history.unshift(entry);
   S.history = S.history.slice(0, 50);
 }
 function setSave(t){ document.getElementById("saveState").textContent = t; }
@@ -315,6 +322,12 @@ function render() {
     h += '<div class="big">出欠を収集中です</div><p class="muted">○が' + NEED + '名以上集まった最初の火曜日が、自動で開催日に決まります。</p>';
   }
   h += "</div>";
+
+  /* 開催日変更バナー（現在の開催日に対応する最新の変更履歴があれば、決定カードの直下に表示） */
+  if (d.date && S.history) {
+    const chg = S.history.find(ev => ev.kind === "datechange" && ev.text.indexOf(fmtDate(d.date)) >= 0);
+    if (chg) h += '<div class="banner-change">📣 ' + esc(chg.text) + "</div>";
+  }
 
   /* 名前選択 */
   h += '<div class="card"><h2>あなたの名前を選んでください</h2><select id="meSel"><option value="">（未選択）</option>';
