@@ -109,6 +109,7 @@ const REPO  = "shodokai-scheduler";
 const FILE  = "state.json";
 const API   = "https://api.github.com/repos/" + OWNER + "/" + REPO + "/contents/" + FILE;
 const NEED  = 4;              // 開催に必要な○の人数
+const WINDOW = 6;             // v3: 表示する候補週の数
 const TIME_LABEL = "19:00–19:30";
 
 /* ===== キー管理（URLの #k= から取り込み、端末に記憶） ===== */
@@ -190,6 +191,9 @@ function priorityCmp(a, b){
 }
 /* v2ラウンドかどうか（round.rules で分岐。未設定は v1 扱い） */
 function isV2(){ return !!(S && S.round && S.round.rules === "v2"); }
+/* v3: 週ごとに独立して開催・担当を決める方式（2026-11-18 有馬の指示で導入。
+   ○がNEED名以上集まった週は、前の週が終わっていなくてもその週の開催と担当が決まる） */
+function isV3(){ return !!(S && S.round && S.round.rules === "v3"); }
 /* v2: 現役メンバー全員が全候補日に回答済み（○/×/？のいずれか）か */
 function answeredAllV2(){
   const r = S.round, resp = r.responses || {};
@@ -215,6 +219,116 @@ function daysUntil(dateStr){
   const t1 = new Date(dateStr + "T00:00:00+09:00");
   return Math.round((t1 - t0) / 86400000);
 }
+/* ===== v3（週ごと独立決定） ===== */
+/* 担当の実効回数: 直近3ヶ月の実績（count）に、確定済み・未開催の担当予定を仮加算する。
+   これにより、まだ終わっていない週の担当が次の週にも続けて選ばれることを防ぐ */
+function effCount(m, exceptDate){
+  let c = m.count;
+  const dec = (S.round && S.round.decisions) || {};
+  for (const d of Object.keys(dec)) if (d !== exceptDate && dec[d].presenterId === m.id) c++;
+  return c;
+}
+/* 担当の実効の直近担当日: 実績の lastDate と、確定済みの担当予定日のうち最も新しい方 */
+function effLast(m, exceptDate){
+  let l = m.lastDate || "0000-00-00";
+  const dec = (S.round && S.round.decisions) || {};
+  for (const d of Object.keys(dec)) if (d !== exceptDate && dec[d].presenterId === m.id && d > l) l = d;
+  return l;
+}
+function pickPresenterV3(date, excluded){
+  const ys = yesIds(date).map(member).filter(m => m.active && !(excluded || []).includes(m.id));
+  ys.sort((a, b) => {
+    const ca = effCount(a, date), cb = effCount(b, date);
+    if (ca !== cb) return ca - cb;
+    const la = effLast(a, date), lb = effLast(b, date);
+    if (la !== lb) return la < lb ? -1 : 1;
+    return a.yomi < b.yomi ? -1 : 1;
+  });
+  return ys.length ? ys[0].id : null;
+}
+/* その週を休会にする（担当が来れなくなり、開催まで1週間を切っている場合） */
+function kyukaiDateV3(date, oldId, record){
+  delete S.round.decisions[date];
+  const vd = (S.round.voidDates = S.round.voidDates || []);
+  if (!vd.includes(date)) vd.push(date);
+  (S.round.voidKind = S.round.voidKind || {})[date] = "kyukai";
+  if (record) pushHistory(fmtDate(date) + " の抄読会は、担当の " + (oldId ? member(oldId).name + " さんが来れなくなり、" : "") + "開催まで1週間を切っているため休会になりました", "kyukai");
+}
+/* 候補日の窓を転がす: 過ぎた候補日（開催記録済み、または未決定のまま終了）を外し、末尾に火曜日を足して WINDOW 件に保つ。
+   決定済みで開催判定がまだの過去日は、判定（cron）が終わるまで残す */
+function rollWindowV3(){
+  const r = S.round, today = jstToday();
+  const done = new Set((S.sessions || []).map(s => s.date));
+  const kept = [];
+  for (const date of r.candidates) {
+    if (date < today && (done.has(date) || !(r.decisions || {})[date])) {
+      if (r.decisions) delete r.decisions[date];
+      for (const id of Object.keys(r.responses || {})) { if (r.responses[id]) delete r.responses[id][date]; }
+      continue;
+    }
+    kept.push(date);
+  }
+  r.candidates = kept;
+  if (!r.candidates.length) r.candidates = nextTuesdays(addDays(today, -1), WINDOW);
+  while (r.candidates.length < WINDOW) {
+    const nxt = nextTuesdays(r.candidates[r.candidates.length - 1], 1)[0];
+    if (!nxt || r.candidates.includes(nxt)) break;
+    r.candidates.push(nxt);
+  }
+}
+/* 開催実施の記録（v3・週単位）。cron の開催判定が同じ内容で行う */
+function completeSessionV3(date){
+  const dec = (S.round.decisions || {})[date]; if (!dec) return;
+  const att = yesIds(date);
+  S.sessions.push({ date: date, presenterId: dec.presenterId, attendees: att });
+  if (dec.presenterId) { const p = member(dec.presenterId); if (p) { p.count += 1; p.refCount += 1; p.lastDate = date; } }
+  pushHistory(fmtDate(date) + " の抄読会を開催済みにしました（担当：" + (dec.presenterId ? member(dec.presenterId).name : "?") + "）");
+  delete S.round.decisions[date];
+  rollWindowV3();
+}
+/* v3の決定同期: 候補日ごとに独立して、決定・繰り上げ・休会・流会・取消を行う */
+function syncDecisionV3(record){
+  const r = S.round;
+  r.decisions = r.decisions || {};
+  r.voidDates = r.voidDates || [];
+  r.voidKind = r.voidKind || {};
+  rollWindowV3();
+  const now = new Date().toISOString();
+  for (const date of [...r.candidates]) {
+    if (r.voidDates.includes(date)) { if (r.decisions[date]) delete r.decisions[date]; continue; }
+    const dec = r.decisions[date];
+    if (dec) {
+      if (!yesIds(date).includes(dec.presenterId)) {
+        /* 担当が来れなくなった: 開催まで1週間以上あれば次点へ繰り上げ、切っていれば休会（有馬の文面どおり >=7日で繰り上げ） */
+        if (daysUntil(date) < 7) { kyukaiDateV3(date, dec.presenterId, record); continue; }
+        const next = pickPresenterV3(date, [dec.presenterId]);
+        if (next) {
+          r.decisions[date] = { presenterId: next, decidedAt: now };
+          if (record) pushHistory(fmtDate(date) + " の担当が " + member(next).name + " さんに自動で繰り上がりました");
+        } else { delete r.decisions[date]; }
+      }
+      if (r.decisions[date] && yesIds(date).length < NEED) {
+        delete r.decisions[date];
+        if (record) pushHistory(fmtDate(date) + " の開催確定が取り消されました（出席" + NEED + "名未満）");
+      }
+      continue;
+    }
+    if (dateImpossible(date)) {
+      r.voidDates.push(date);
+      r.voidKind[date] = "dead";
+      if (record) pushHistory(fmtDate(date) + " は、出席できる方が" + NEED + "名に届かなくなったため流会になりました", "dead");
+      continue;
+    }
+    if (yesIds(date).length >= NEED) {
+      const p = pickPresenterV3(date, []);
+      if (p) {
+        r.decisions[date] = { presenterId: p, decidedAt: now };
+        if (record) { pushHistory("開催日が " + fmtDate(date) + " に自動確定しました"); pushHistory(fmtDate(date) + " の担当が " + member(p).name + " さんに自動決定しました"); }
+      }
+    }
+  }
+}
+
 /* 現在の決定を導出する（保存値ではなく常に再計算） */
 function derive(){
   const r = S.round;
@@ -309,6 +423,7 @@ function cancelRoundKyukai(record, date, oldId) {
 }
 /* 導出した決定と保存値を同期し、変化があれば履歴に残す（書き込みは呼び出し側） */
 function syncDecision(record) {
+  if (S.round.rules === "v3") { syncDecisionV3(record); return; }
   const r0 = S.round;
   /* v2・未決定ラウンド: 開催人数に届く見込みがなくなった候補日は、その時点で流会として確定させる
      （一度流会にした日は、後から回答が変わっても戻さない）。全候補日が流会なら回ごと見送りにして組み直す */
@@ -379,23 +494,33 @@ function render() {
   const app = document.getElementById("app");
   if (!KEY) { app.innerHTML = setupHtml(); return; }
   if (!S) return;
-  const d = derive();
   const r = S.round;
+  const v3 = isV3();
+  const d = v3 ? { date: null, presenterId: null, ask: null } : derive();
+  const decMap = v3 ? (r.decisions || {}) : {};
+  const decDates = v3 ? Object.keys(decMap).filter(dt => dt >= jstToday()).sort() : [];
+  const nextDate = v3 ? (decDates[0] || null) : d.date;
   let h = "";
 
   /* 次回カード */
   h += '<div class="card next"><h2>次回の抄読会</h2>';
-  if (d.date) {
-    const att = yesIds(d.date).map(id => member(id).name);
-    const pLabel = d.ask ? "調整中（" + esc(member(d.ask.candidateId).name) + " さんに確認中）"
-      : (d.presenterId ? esc(member(d.presenterId).name) + " さん" : "（未定）");
-    h += '<div class="big">' + fmtDate(d.date) + " " + TIME_LABEL + "<br>担当：<span class='presenter'>" + pLabel + "</span></div>";
+  if (nextDate) {
+    const att = yesIds(nextDate).map(id => member(id).name);
+    const nPid = v3 ? decMap[nextDate].presenterId : d.presenterId;
+    const pLabel = (!v3 && d.ask) ? "調整中（" + esc(member(d.ask.candidateId).name) + " さんに確認中）"
+      : (nPid ? esc(member(nPid).name) + " さん" : "（未定）");
+    h += '<div class="big">' + fmtDate(nextDate) + " " + TIME_LABEL + "<br>担当：<span class='presenter'>" + pLabel + "</span></div>";
     h += '<p class="muted">出席予定 ' + att.length + "名：" + att.map(esc).join("、") + "</p>";
-    const pName = d.ask ? "調整中" : (d.presenterId ? member(d.presenterId).name + " さん" : "（未定）");
+    if (v3 && decDates.length > 1) {
+      h += '<p class="muted">その後の開催：' + decDates.slice(1).map(dt => fmtDate(dt) + "（担当：" + esc(member(decMap[dt].presenterId).name) + "）").join("、") + "</p>";
+    }
+    const pName = (!v3 && d.ask) ? "調整中" : (nPid ? member(nPid).name + " さん" : "（未定）");
     const gUrl = "https://calendar.google.com/calendar/render?action=TEMPLATE&text=" + encodeURIComponent("抄読会") +
-      "&dates=" + d.date.replace(/-/g, "") + "T100000Z/" + d.date.replace(/-/g, "") + "T103000Z" +
+      "&dates=" + nextDate.replace(/-/g, "") + "T100000Z/" + nextDate.replace(/-/g, "") + "T103000Z" +
       "&details=" + encodeURIComponent("担当：" + pName + "\n出欠の変更はアプリからお願いします");
     h += '<p><a class="gcal" href="' + gUrl + '" target="_blank" rel="noopener">📅 Googleカレンダーに追加</a></p>';
+  } else if (v3) {
+    h += '<div class="big">出欠を収集中です</div><p class="muted">○が' + NEED + '名以上集まった週は、その週ごとに開催日と担当が自動で決まります。分からない日は「？」で回答しておいてください。</p>';
   } else if (isV2()) {
     h += '<div class="big">出欠を収集中です</div><p class="muted">全員の回答が揃うか、最初の候補日の前日になった時点で、○が' + NEED + '名以上いる最初の火曜日が開催日に決まります。分からない日は「？」で回答しておいてください。</p>';
   } else {
@@ -403,8 +528,8 @@ function render() {
   }
   h += "</div>";
 
-  /* 開催日変更バナー（現在の開催日に対応する最新の変更履歴があれば、決定カードの直下に表示） */
-  if (d.date && S.history) {
+  /* 開催日変更バナー（現在の開催日に対応する最新の変更履歴があれば、決定カードの直下に表示。v3では日付変更の概念がないため対象外） */
+  if (!v3 && d.date && S.history) {
     const chg = S.history.find(ev => ev.kind === "datechange" && ev.text.indexOf(fmtDate(d.date)) >= 0);
     if (chg) h += '<div class="banner-change">📣 ' + esc(chg.text) + "</div>";
   }
@@ -421,19 +546,26 @@ function render() {
   for (const date of r.candidates) {
     const ys = yesIds(date);
     const mb = maybeIds(date);
-    const dead = (r.deadDates || []).includes(date);
+    const dec = v3 ? decMap[date] : null;
+    const isDec = v3 ? !!dec : (d.date === date);
+    const dead = v3 ? (r.voidDates || []).includes(date) : (r.deadDates || []).includes(date);
+    const voidKind = v3 ? ((r.voidKind || {})[date] || "dead") : "dead";
     const mine = myId && r.responses[myId] ? r.responses[myId][date] : undefined;
-    h += '<div class="cand' + (d.date === date ? " decided" : "") + (dead ? " dead" : "") + '"><span class="date">' + fmtDate(date) + "</span> " + TIME_LABEL +
+    h += '<div class="cand' + (isDec ? " decided" : "") + (dead ? " dead" : "") + '"><span class="date">' + fmtDate(date) + "</span> " + TIME_LABEL +
          '　<span class="cnt">○ ' + ys.length + "名</span>" +
          (mb.length ? '　<span class="cnt" style="background:#fef3c7;color:#92400e;">？ ' + mb.length + "名</span>" : "") +
-         (d.date === date ? '<span class="tag">開催決定</span>' : "") + (dead ? '<span class="tag tag-dead">流会</span>' : "") + "<br>";
+         (isDec ? '<span class="tag">開催決定</span>' : "") + (dead ? '<span class="tag tag-dead">流会</span>' : "") + "<br>";
     h += '<div class="bar"><i style="width:' + Math.min(100, Math.round(ys.length / NEED * 100)) + '%"></i></div>';
     if (dead) {
-      h += '<p class="muted" style="margin:6px 0 0;">出席できる方が' + NEED + '名に届かなくなったため、この日は流会になりました</p>';
-    } else if (d.date !== date && ys.length < NEED) {
-      h += '<p class="muted" style="margin:6px 0 0;">' + (isV2() ? '開催にはあと ' + (NEED - ys.length) + ' 名の○が必要です' : 'あと ' + (NEED - ys.length) + ' 名の○で開催決定です') + '</p>';
-    } else if (isV2() && d.date !== date && !r.decidedDate) {
+      h += '<p class="muted" style="margin:6px 0 0;">' + (voidKind === "kyukai" ? "担当の方が来れなくなったため、この週は休会になりました" : voidKind === "skip" ? "この日は流会になりました" : "出席できる方が" + NEED + "名に届かなくなったため、この日は流会になりました") + '</p>';
+    } else if (!isDec && ys.length < NEED) {
+      h += '<p class="muted" style="margin:6px 0 0;">' + (v3 ? "あと " + (NEED - ys.length) + " 名の○で、この週の開催と担当が決まります" : (isV2() ? "開催にはあと " + (NEED - ys.length) + " 名の○が必要です" : "あと " + (NEED - ys.length) + " 名の○で開催決定です")) + '</p>';
+    } else if (!v3 && isV2() && d.date !== date && !r.decidedDate) {
       h += '<p class="muted" style="margin:6px 0 0;">○は揃っています。開催の決定は、全員の回答が揃った時点（遅くとも最初の候補日の前日）です</p>';
+    }
+    if (v3 && dec) {
+      h += '<p style="margin:8px 0 0;">担当：<b>' + esc(member(dec.presenterId).name) + ' さん</b></p>';
+      h += '<div class="actions" style="margin-top:8px;"><button class="ghost" data-swap="' + date + '">担当を交代する（次点に繰り上げ）</button><button class="danger" data-skip="' + date + '">この日は流会にする</button></div>';
     }
     if (myId && !dead) {
       h += '<div class="btns"><button data-resp="yes" data-date="' + date + '" class="' + (mine === "yes" ? "sel-yes" : "") + '">○ 出席する</button>';
@@ -449,8 +581,8 @@ function render() {
   }
   h += "</div>";
 
-  /* 確定後の操作（対象の開催日を明示する） */
-  if (d.date) {
+  /* 確定後の操作（対象の開催日を明示する。v3では各候補日カードの中にボタンを置くため、このカードは使わない） */
+  if (!v3 && d.date) {
     h += '<div class="card"><h2>' + fmtDate(d.date) + ' 19:00 の回について</h2>' +
       '<p class="muted" style="margin:0 0 10px;">下のボタンはすべて ' + fmtDate(d.date) + ' の回への操作です。</p><div class="actions">';
     /* 「開催済み」ボタンは全ラウンドで廃止（開催実施はカレンダーで自動判定する。有馬の指示 2026-11-18）。
@@ -465,8 +597,11 @@ function render() {
   h += '<div class="card"><h2>メンバー（次回担当の目安順）</h2><table><tr><th>順</th><th>名前</th><th>担当回数（直近3ヶ月）</th><th>直近担当</th><th>参考:直近1年</th></tr>';
   let rank = 0;
   for (const m of sorted) {
+    let mtags = "";
+    if (v3) { for (const dt of decDates) if (decMap[dt].presenterId === m.id) mtags += '<span class="tag">' + (dt === nextDate ? "次回担当" : fmtDateShort(dt) + " 担当") + '</span>'; }
+    else { mtags = (d.presenterId === m.id ? '<span class="tag">次回担当</span>' : "") + (d.ask && d.ask.candidateId === m.id ? '<span class="tag">担当確認中</span>' : ""); }
     h += '<tr class="' + (m.active ? "" : "inactive") + (myId === m.id ? " me" : "") + '"><td>' + (m.active ? (++rank) : "—") + "</td><td>" +
-      esc(m.name) + (m.active ? "" : "（休止）") + (d.presenterId === m.id ? '<span class="tag">次回担当</span>' : "") + (d.ask && d.ask.candidateId === m.id ? '<span class="tag">担当確認中</span>' : "") + "</td><td>" + m.count + "回</td><td>" +
+      esc(m.name) + (m.active ? "" : "（休止）") + mtags + "</td><td>" + m.count + "回</td><td>" +
       fmtDateShort(m.lastDate) + "</td><td>" + m.refCount + "回</td></tr>";
   }
   h += "</table></div>";
@@ -499,6 +634,8 @@ function render() {
   const bd = document.getElementById("btnDone"); if (bd) bd.addEventListener("click", onDone);
   const bs = document.getElementById("btnSwap"); if (bs) bs.addEventListener("click", onSwap);
   const bk = document.getElementById("btnSkip"); if (bk) bk.addEventListener("click", onSkip);
+  app.querySelectorAll("[data-swap]").forEach(b => b.addEventListener("click", () => onSwapV3(b.dataset.swap)));
+  app.querySelectorAll("[data-skip]").forEach(b => b.addEventListener("click", () => onSkipV3(b.dataset.skip)));
 }
 function setupHtml() {
   return '<div class="card setup"><h2>アクセスキーの設定</h2>' +
@@ -542,6 +679,35 @@ function onSkip() {
     S.round = buildNextRound(S.round, d.date);
   }, "session skipped");
 }
+/* v3: その週の担当を手動で交代する（1週間を切っていれば休会の確認になる） */
+function onSwapV3(date) {
+  const dec = (S.round.decisions || {})[date]; if (!dec) return;
+  const cur = dec.presenterId;
+  if (daysUntil(date) < 7) {
+    if (!confirm(fmtDate(date) + " は開催まで1週間を切っています。担当が来れない場合、その週は休会になります。休会にしてよろしいですか？")) return;
+    mutate(() => { kyukaiDateV3(date, cur, true); }, "session kyukai");
+    return;
+  }
+  if (!confirm(fmtDate(date) + " の担当を " + member(cur).name + " さんから次点の方に交代します。よろしいですか？")) return;
+  mutate(() => {
+    const next = pickPresenterV3(date, [cur]);
+    if (next) {
+      S.round.decisions[date] = { presenterId: next, decidedAt: new Date().toISOString() };
+      pushHistory(fmtDate(date) + " の担当が " + member(next).name + " さんに交代しました（前担当：" + member(cur).name + "）");
+    } else { alert("交代できる方がいません"); }
+  }, "presenter swap");
+}
+/* v3: その週だけを流会にする */
+function onSkipV3(date) {
+  if (!confirm(fmtDate(date) + " の開催を流会にします。この日は開催されません。よろしいですか？")) return;
+  mutate(() => {
+    delete S.round.decisions[date];
+    const vd = (S.round.voidDates = S.round.voidDates || []);
+    if (!vd.includes(date)) vd.push(date);
+    (S.round.voidKind = S.round.voidKind || {})[date] = "skip";
+    pushHistory(fmtDate(date) + " の開催が流会になりました", "skip");
+  }, "session skipped");
+}
 
 /* ===== 起動 ===== */
 async function boot() {
@@ -549,7 +715,7 @@ async function boot() {
   try {
     await loadState();
     /* 読み込み時点の決定同期（変化があれば保存して履歴化） */
-    const snap = () => JSON.stringify([S.round.decidedDate, S.round.presenterId, S.round.ask ? S.round.ask.candidateId : null, S.round.seq, (S.round.deadDates || []).join(",")]);
+    const snap = () => JSON.stringify([S.round.decidedDate, S.round.presenterId, S.round.ask ? S.round.ask.candidateId : null, S.round.seq, (S.round.deadDates || []).join(","), JSON.stringify(S.round.decisions || {}), (S.round.voidDates || []).join(","), (S.round.candidates || []).join(",")]);
     const before = snap();
     syncDecision(true);
     render();
