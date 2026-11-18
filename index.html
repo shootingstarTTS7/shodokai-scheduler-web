@@ -401,7 +401,7 @@ function render() {
   h += '<div class="card"><h2>候補日と出欠</h2>';
   for (const date of r.candidates) {
     const ys = yesIds(date);
-    const mb = isV2() ? maybeIds(date) : [];
+    const mb = maybeIds(date);
     const mine = myId && r.responses[myId] ? r.responses[myId][date] : undefined;
     h += '<div class="cand' + (d.date === date ? " decided" : "") + '"><span class="date">' + fmtDate(date) + "</span> " + TIME_LABEL +
          '　<span class="cnt">○ ' + ys.length + "名</span>" +
@@ -417,7 +417,7 @@ function render() {
     }
     if (myId) {
       h += '<div class="btns"><button data-resp="yes" data-date="' + date + '" class="' + (mine === "yes" ? "sel-yes" : "") + '">○ 出席できる</button>';
-      if (isV2()) h += '<button data-resp="maybe" data-date="' + date + '" class="' + (mine === "maybe" ? "sel-maybe" : "") + '">？ わからない</button>';
+      h += '<button data-resp="maybe" data-date="' + date + '" class="' + (mine === "maybe" ? "sel-maybe" : "") + '">？ わからない</button>';
       h += '<button data-resp="no" data-date="' + date + '" class="' + (mine === "no" ? "sel-no" : "") + '">× できない</button></div>';
     }
     h += '<div class="grid">' + activeMembers().map(m => {
