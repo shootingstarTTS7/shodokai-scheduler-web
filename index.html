@@ -144,11 +144,11 @@ function maybeIds(date){
   return activeMembers().filter(m => r[m.id] && r[m.id][date] === "maybe").map(m => m.id);
 }
 /* 担当の優先順位: 担当回数が少ない順 → 前回担当から空いている順 → 五十音順。
-   回数の基準はラウンドのルールで切り替える: v1 は count（直近3ヶ月）、v2 は refCount（直近1年）。
-   ※進行中の v1 ラウンドの決定を変えないため、この分岐は必須 */
+   回数の基準は全ルール共通で count（直近3ヶ月）。refCount（直近1年）は参考表示のみ。
+   （2026-11-18: v2 で一時 refCount 基準にしたが、有馬の指示で直近3ヶ月に戻した） */
 function priorityCmp(a, b){
-  const ka = isV2() ? a.refCount : a.count;
-  const kb = isV2() ? b.refCount : b.count;
+  const ka = a.count;
+  const kb = b.count;
   if (ka !== kb) return ka - kb;
   const la = a.lastDate || "0000-00-00", lb = b.lastDate || "0000-00-00";
   if (la !== lb) return la < lb ? -1 : 1;
@@ -450,12 +450,12 @@ function render() {
 
   /* メンバー一覧 */
   const sorted = [...S.members].sort((a, b) => (a.active === b.active) ? priorityCmp(a, b) : (a.active ? -1 : 1));
-  h += '<div class="card"><h2>メンバー（次回担当の目安順）</h2><table><tr><th>順</th><th>名前</th><th>担当回数（直近1年）</th><th>直近担当</th></tr>';
+  h += '<div class="card"><h2>メンバー（次回担当の目安順）</h2><table><tr><th>順</th><th>名前</th><th>担当回数（直近3ヶ月）</th><th>直近担当</th><th>参考:直近1年</th></tr>';
   let rank = 0;
   for (const m of sorted) {
     h += '<tr class="' + (m.active ? "" : "inactive") + (myId === m.id ? " me" : "") + '"><td>' + (m.active ? (++rank) : "—") + "</td><td>" +
-      esc(m.name) + (m.active ? "" : "（休止）") + (d.presenterId === m.id ? '<span class="tag">次回担当</span>' : "") + (d.ask && d.ask.candidateId === m.id ? '<span class="tag">担当確認中</span>' : "") + "</td><td>" + m.refCount + "回</td><td>" +
-      fmtDateShort(m.lastDate) + "</td></tr>";
+      esc(m.name) + (m.active ? "" : "（休止）") + (d.presenterId === m.id ? '<span class="tag">次回担当</span>' : "") + (d.ask && d.ask.candidateId === m.id ? '<span class="tag">担当確認中</span>' : "") + "</td><td>" + m.count + "回</td><td>" +
+      fmtDateShort(m.lastDate) + "</td><td>" + m.refCount + "回</td></tr>";
   }
   h += "</table></div>";
 
