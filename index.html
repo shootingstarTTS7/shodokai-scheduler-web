@@ -434,18 +434,17 @@ function render() {
     h += '<div class="card ask"><h2>急な担当のお願い🙏</h2>' +
       '<p>' + fmtDate(d.ask.forDate) + ' の担当だった ' + esc(dropped) + ' さんが来れなくなりました。<br>次点はあなたです。担当を引き受けられますか？</p>' +
       '<div class="actions"><button id="btnAskYes">引き受ける</button><button id="btnAskNo" class="danger">無理です</button></div>' +
-      '<p class="muted">「無理です」を押すと、次の方に確認が移ります。引き受け手がいない場合は、その回は見送りになります。</p></div>';
+      '<p class="muted">「無理です」を押すと、次の方に確認が移ります。引き受け手がいない場合は、その回は流会になります。</p></div>';
   }
 
   /* 確定後の操作（対象の開催日を明示する） */
   if (d.date) {
     h += '<div class="card"><h2>' + fmtDate(d.date) + ' 19:00 の回について</h2>' +
       '<p class="muted" style="margin:0 0 10px;">下のボタンはすべて ' + fmtDate(d.date) + ' の回への操作です。</p><div class="actions">';
-    /* 「開催済み」ボタンは v1 ラウンドのみ（v2 はカレンダーで自動判定する） */
-    if (!isV2()) h += '<button id="btnDone">開催済みにする（担当の回数+1＆次の候補へ）</button>';
-    h += '<button id="btnSwap" class="ghost">担当を交代する（次点に繰り上げ）</button>' +
-      '<button id="btnSkip" class="danger">この日は見送る</button></div>' +
-      '<p class="muted">' + fmtDate(d.date) + ' の担当の方が来れなくなった場合：' + fmtDate(d.date) + ' まで1週間より前なら、自動で次点の方に繰り上がります。1週間を切っている場合は次点の方にアプリで確認が届き、引き受け手がいなければ ' + fmtDate(d.date) + ' の回は見送りになります。</p></div>';
+    /* 「開催済み」ボタンは全ラウンドで廃止（開催実施はカレンダーで自動判定する。有馬の指示 2026-11-18）。
+       担当の手動交代も行わない（欠席は自動繰り上げ／確認フローで処理する）。残す操作は流会のみ。 */
+    h += '<button id="btnSkip" class="danger">この日は流会にする</button></div>' +
+      '<p class="muted">' + fmtDate(d.date) + ' の担当の方が来れなくなった場合：' + fmtDate(d.date) + ' まで1週間より前なら、自動で次点の方に繰り上がります。1週間を切っている場合は次点の方にアプリで確認が届き、引き受け手がいなければ ' + fmtDate(d.date) + ' の回は流会になります。</p></div>';
   }
 
   /* メンバー一覧 */
