@@ -271,7 +271,9 @@ function rollWindowV3(){
   r.candidates = kept;
   if (!r.candidates.length) r.candidates = nextTuesdays(addDays(today, -1), WINDOW);
   while (r.candidates.length < WINDOW) {
-    const nxt = nextTuesdays(r.candidates[r.candidates.length - 1], 1)[0];
+    const last = r.candidates[r.candidates.length - 1];
+    const base = last > today ? last : today;
+    const nxt = nextTuesdays(base, 1)[0];
     if (!nxt || r.candidates.includes(nxt)) break;
     r.candidates.push(nxt);
   }
