@@ -22,9 +22,7 @@
   @media (min-width:900px) {
     main { max-width:880px; }
     header .brand, header .save { max-width:856px; }
-    .card.cands { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-    .card.cands h2 { grid-column:1 / -1; margin-bottom:0; }
-    .card.cands .cand { margin-bottom:0; }
+    /* 候補日カードは1行に1つ（縦並び）に戻した（2026-11-18 有馬の指摘） */
   }
   @media (min-width:1280px) {
     main { max-width:1080px; }
@@ -58,6 +56,15 @@
   .btns button.sel-no { background:linear-gradient(135deg,#dc2626,#ef4444); border-color:transparent; color:#fff; box-shadow:0 6px 16px rgba(239,68,68,.3); }
   .btns button.sel-maybe { background:linear-gradient(135deg,#d97706,#f59e0b); border-color:transparent; color:#fff; box-shadow:0 6px 16px rgba(245,158,11,.3); }
   .grid { margin-top:8px; font-size:12.5px; color:var(--sub); line-height:2; word-break:break-all; }
+  /* 出欠名簿は名前を1列に並べる（2026-11-18 有馬の指摘） */
+  .roster { margin-top:10px; border-top:1px solid var(--line); }
+  .rrow { display:flex; justify-content:space-between; align-items:center; padding:6px 2px; border-bottom:1px solid var(--line); font-size:14px; }
+  .rrow:last-child { border-bottom:none; }
+  .rrow .mk { font-weight:800; min-width:26px; text-align:center; }
+  .rrow .mk.y { color:var(--ok); }
+  .rrow .mk.n { color:var(--ng); }
+  .rrow .mk.q { color:#d97706; }
+  .rrow .mk.u { color:#c3c7d4; }
   .grid b { color:var(--txt); font-weight:600; }
   .actions { display:flex; flex-direction:column; gap:8px; }
   .actions button { font-size:15px; font-weight:700; padding:13px; border-radius:12px; border:none; background:linear-gradient(135deg,var(--main),var(--main2)); color:#fff; cursor:pointer; box-shadow:0 6px 16px rgba(79,70,229,.3); font-family:inherit; }
@@ -410,7 +417,7 @@ function render() {
   h += "</div>";
 
   /* 候補日 */
-  h += '<div class="card cands"><h2>候補日と出欠</h2>';
+  h += '<div class="card"><h2>候補日と出欠</h2>';
   for (const date of r.candidates) {
     const ys = yesIds(date);
     const mb = maybeIds(date);
@@ -420,8 +427,6 @@ function render() {
          '　<span class="cnt">○ ' + ys.length + "名</span>" +
          (mb.length ? '　<span class="cnt" style="background:#fef3c7;color:#92400e;">？ ' + mb.length + "名</span>" : "") +
          (d.date === date ? '<span class="tag">開催決定</span>' : "") + (dead ? '<span class="tag tag-dead">流会</span>' : "") + "<br>";
-    h += '<span class="muted">○：' + (ys.length ? ys.map(id => esc(member(id).name)).join("、") : "まだいません") + "</span>";
-    if (mb.length) h += '<br><span class="muted">？：' + mb.map(id => esc(member(id).name)).join("、") + "</span>";
     h += '<div class="bar"><i style="width:' + Math.min(100, Math.round(ys.length / NEED * 100)) + '%"></i></div>';
     if (dead) {
       h += '<p class="muted" style="margin:6px 0 0;">出席できる方が' + NEED + '名に届かなくなったため、この日は流会になりました</p>';
@@ -435,10 +440,11 @@ function render() {
       h += '<button data-resp="maybe" data-date="' + date + '" class="' + (mine === "maybe" ? "sel-maybe" : "") + '">？ 分からない</button>';
       h += '<button data-resp="no" data-date="' + date + '" class="' + (mine === "no" ? "sel-no" : "") + '">× 出席しない</button></div>';
     }
-    h += '<div class="grid">' + activeMembers().map(m => {
+    h += '<div class="roster">' + activeMembers().map(m => {
       const v = r.responses[m.id] ? r.responses[m.id][date] : undefined;
-      return "<b>" + esc(m.name) + "</b> " + (v === "yes" ? "○" : v === "no" ? "×" : v === "maybe" ? "？" : "—");
-    }).join("　") + "</div>";
+      const mk = v === "yes" ? '<span class="mk y">○</span>' : v === "no" ? '<span class="mk n">×</span>' : v === "maybe" ? '<span class="mk q">？</span>' : '<span class="mk u">—</span>';
+      return '<div class="rrow"><span>' + esc(m.name) + "</span>" + mk + "</div>";
+    }).join("") + "</div>";
     h += "</div>";
   }
   h += "</div>";
