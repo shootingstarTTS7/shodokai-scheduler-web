@@ -41,6 +41,7 @@
   .btns button:active { transform:scale(.97); }
   .btns button.sel-yes { background:linear-gradient(135deg,#16a34a,#22c55e); border-color:transparent; color:#fff; box-shadow:0 6px 16px rgba(34,197,94,.35); }
   .btns button.sel-no { background:linear-gradient(135deg,#dc2626,#ef4444); border-color:transparent; color:#fff; box-shadow:0 6px 16px rgba(239,68,68,.3); }
+  .btns button.sel-maybe { background:linear-gradient(135deg,#d97706,#f59e0b); border-color:transparent; color:#fff; box-shadow:0 6px 16px rgba(245,158,11,.3); }
   .grid { margin-top:8px; font-size:12.5px; color:var(--sub); line-height:2; word-break:break-all; }
   .grid b { color:var(--txt); font-weight:600; }
   .actions { display:flex; flex-direction:column; gap:8px; }
@@ -96,7 +97,9 @@ let KEY = localStorage.getItem("shodokai_key") || "";
 })();
 
 /* ===== 日付ユーティリティ（JST基準） ===== */
+let TODAY_OVERRIDE = null; /* テスト用フック（通常は null） */
 function jstToday() {
+  if (TODAY_OVERRIDE) return TODAY_OVERRIDE;
   return new Intl.DateTimeFormat("en-CA", { timeZone:"Asia/Tokyo", year:"numeric", month:"2-digit", day:"2-digit" }).format(new Date());
 }
 function addDays(ymd, n) {
@@ -136,11 +139,36 @@ function yesIds(date){
   const r = S.round.responses || {};
   return activeMembers().filter(m => r[m.id] && r[m.id][date] === "yes").map(m => m.id);
 }
+function maybeIds(date){
+  const r = S.round.responses || {};
+  return activeMembers().filter(m => r[m.id] && r[m.id][date] === "maybe").map(m => m.id);
+}
+/* 担当の優先順位: 担当回数が少ない順 → 前回担当から空いている順 → 五十音順。
+   回数の基準はラウンドのルールで切り替える: v1 は count（直近3ヶ月）、v2 は refCount（直近1年）。
+   ※進行中の v1 ラウンドの決定を変えないため、この分岐は必須 */
 function priorityCmp(a, b){
-  if (a.count !== b.count) return a.count - b.count;
+  const ka = isV2() ? a.refCount : a.count;
+  const kb = isV2() ? b.refCount : b.count;
+  if (ka !== kb) return ka - kb;
   const la = a.lastDate || "0000-00-00", lb = b.lastDate || "0000-00-00";
   if (la !== lb) return la < lb ? -1 : 1;
   return a.yomi < b.yomi ? -1 : 1;
+}
+/* v2ラウンドかどうか（round.rules で分岐。未設定は v1 扱い） */
+function isV2(){ return !!(S && S.round && S.round.rules === "v2"); }
+/* v2: 現役メンバー全員が全候補日に回答済み（○/×/？のいずれか）か */
+function answeredAllV2(){
+  const r = S.round, resp = r.responses || {};
+  return activeMembers().every(m => r.candidates.every(d => {
+    const v = resp[m.id] && resp[m.id][d];
+    return v === "yes" || v === "no" || v === "maybe";
+  }));
+}
+/* v2: 決定タイミングを迎えたか（全員回答、または最初の候補日の前日に到達） */
+function decisionDueV2(){
+  if (!isV2()) return false;
+  if (jstToday() >= addDays(S.round.candidates[0], -1)) return true;
+  return answeredAllV2();
 }
 function pickPresenter(date, excluded){
   const ys = yesIds(date).map(member).filter(m => !excluded.includes(m.id));
@@ -156,6 +184,11 @@ function daysUntil(dateStr){
 /* 現在の決定を導出する（保存値ではなく常に再計算） */
 function derive(){
   const r = S.round;
+  /* v2: 初回決定はタイミング（全員回答 or 最初の候補日の前日）まで行わない。
+     一度決定したラウンド（everDecided）は従来通りいつでも再計算する */
+  if (r.rules === "v2" && !r.decidedDate && !r.everDecided && !decisionDueV2()) {
+    return { date: null, presenterId: null, excluded: [], ask: null };
+  }
   for (const date of r.candidates) {
     if (yesIds(date).length >= NEED) {
       const ex = (r.decidedDate === date) ? (r.excludedPresenters || []) : [];
@@ -211,6 +244,29 @@ async function mutate(fn, message) {
   }
   saving = false; render();
 }
+/* 次ラウンドを構築する（新しいラウンドは常に v2 ルール）。
+   afterDate の次の火曜日から4件を候補にし、重なる日付の回答だけ引き継ぐ */
+function buildNextRound(prev, afterDate) {
+  const newCands = nextTuesdays(afterDate, 4);
+  const keep = {};
+  for (const id of Object.keys(prev.responses || {})) { keep[id] = {}; for (const nd of newCands) if (prev.responses[id][nd]) keep[id][nd] = prev.responses[id][nd]; }
+  return { seq: (prev.seq || 1) + 1, rules: "v2", candidates: newCands, responses: keep, excludedPresenters: [], decidedDate: null, decidedAt: null, presenterId: null, presenterDecidedAt: null, ask: null, presenterOverride: null, everDecided: false };
+}
+/* v2: 決定タイミングを迎えたのに、どの候補日も○が NEED 名未満 → そのラウンドは見送り */
+function skipRoundV2(record) {
+  const r = S.round;
+  if (record) pushHistory("候補日はいずれも出席" + NEED + "名未満のため、この回は見送りになりました（次回候補日に組み直しました）", "skip");
+  S.round = buildNextRound(r, r.candidates[r.candidates.length - 1]);
+}
+/* 開催実施の記録（担当の回数+1・開催ログ追記・次ラウンド構築）。
+   v1の「開催済み」ボタンと、cron の自動判定（v2）が同じ内容で行う */
+function completeSession(d) {
+  const att = yesIds(d.date);
+  S.sessions.push({ date: d.date, presenterId: d.presenterId, attendees: att });
+  if (d.presenterId) { const p = member(d.presenterId); p.count += 1; p.refCount += 1; p.lastDate = d.date; }
+  pushHistory(fmtDate(d.date) + " の抄読会を開催済みにしました（担当：" + (d.presenterId ? member(d.presenterId).name : "?") + "）");
+  S.round = buildNextRound(S.round, d.date);
+}
 /* 担当の確認を次の候補へ進める（候補が尽きたらその回は見送り） */
 function advanceAsk(record) {
   const r = S.round;
@@ -235,22 +291,25 @@ function cancelRoundNoPresenter(record) {
   const r = S.round;
   const date = (r.ask && r.ask.forDate) || r.decidedDate;
   if (record && date) pushHistory(fmtDate(date) + " の抄読会は、担当を引き受けられる方がいなかったため見送りになりました");
-  const keep = {};
-  const newCands = nextTuesdays(date, 4);
-  for (const id of Object.keys(r.responses || {})) { keep[id] = {}; for (const nd of newCands) if (r.responses[id][nd]) keep[id][nd] = r.responses[id][nd]; }
-  S.round = { seq: (r.seq || 1) + 1, candidates: newCands, responses: keep, excludedPresenters: [], decidedDate: null, decidedAt: null, presenterId: null, presenterDecidedAt: null, ask: null, presenterOverride: null };
+  S.round = buildNextRound(r, date);
 }
 /* 導出した決定と保存値を同期し、変化があれば履歴に残す（書き込みは呼び出し側） */
 function syncDecision(record) {
   const d = derive();
   const r = S.round;
   const now = new Date().toISOString();
+  /* v2: 決定タイミングを迎えたのに決定できない（全候補日○不足）→ ラウンド見送り */
+  if (r.rules === "v2" && !r.decidedDate && !r.everDecided && !d.date && decisionDueV2()) {
+    skipRoundV2(record);
+    return;
+  }
   if (d.date !== r.decidedDate) {
     if (record) {
       if (d.date && r.decidedDate) pushHistory("開催日が変更になりました：" + fmtDate(r.decidedDate) + " → " + fmtDate(d.date), "datechange");
       else if (d.date) pushHistory("開催日が " + fmtDate(d.date) + " に自動確定しました");
       else pushHistory("開催日の確定が取り消されました（出席4名未満）");
     }
+    if (d.date) r.everDecided = true;
     r.decidedDate = d.date; r.decidedAt = d.date ? now : null;
     r.excludedPresenters = d.excluded;
     r.presenterId = d.presenterId; r.presenterDecidedAt = d.presenterId ? now : null;
@@ -318,6 +377,8 @@ function render() {
       "&dates=" + d.date.replace(/-/g, "") + "T100000Z/" + d.date.replace(/-/g, "") + "T103000Z" +
       "&details=" + encodeURIComponent("担当：" + pName + "\n出欠の変更はアプリからお願いします");
     h += '<p><a class="gcal" href="' + gUrl + '" target="_blank" rel="noopener">📅 Googleカレンダーに追加</a></p>';
+  } else if (isV2()) {
+    h += '<div class="big">出欠を収集中です</div><p class="muted">全員の回答が揃うか、最初の候補日の前日になった時点で、○が' + NEED + '名以上いる最初の火曜日が開催日に決まります。分からない日は「？」で回答しておいてください。</p>';
   } else {
     h += '<div class="big">出欠を収集中です</div><p class="muted">○が' + NEED + '名以上集まった最初の火曜日が、自動で開催日に決まります。</p>';
   }
@@ -333,26 +394,35 @@ function render() {
   h += '<div class="card"><h2>あなたの名前を選んでください</h2><select id="meSel"><option value="">（未選択）</option>';
   for (const m of activeMembers()) h += '<option value="' + m.id + '"' + (myId === m.id ? " selected" : "") + ">" + esc(m.name) + "</option>";
   h += "</select>";
-  if (!myId) h += '<p class="muted">名前を選ぶと、出欠（○/×）を入力できます。</p>';
+  if (!myId) h += '<p class="muted">名前を選ぶと、出欠を入力できます。</p>';
   h += "</div>";
 
   /* 候補日 */
   h += '<div class="card"><h2>候補日と出欠</h2>';
   for (const date of r.candidates) {
     const ys = yesIds(date);
+    const mb = isV2() ? maybeIds(date) : [];
     const mine = myId && r.responses[myId] ? r.responses[myId][date] : undefined;
     h += '<div class="cand' + (d.date === date ? " decided" : "") + '"><span class="date">' + fmtDate(date) + "</span> " + TIME_LABEL +
-         '　<span class="cnt">○ ' + ys.length + "名</span>" + (d.date === date ? '<span class="tag">開催決定</span>' : "") + "<br>";
+         '　<span class="cnt">○ ' + ys.length + "名</span>" +
+         (mb.length ? '　<span class="cnt" style="background:#fef3c7;color:#92400e;">？ ' + mb.length + "名</span>" : "") +
+         (d.date === date ? '<span class="tag">開催決定</span>' : "") + "<br>";
     h += '<span class="muted">○：' + (ys.length ? ys.map(id => esc(member(id).name)).join("、") : "まだいません") + "</span>";
+    if (mb.length) h += '<br><span class="muted">？：' + mb.map(id => esc(member(id).name)).join("、") + "</span>";
     h += '<div class="bar"><i style="width:' + Math.min(100, Math.round(ys.length / NEED * 100)) + '%"></i></div>';
-    if (d.date !== date && ys.length < NEED) h += '<p class="muted" style="margin:6px 0 0;">あと ' + (NEED - ys.length) + ' 名の○で開催決定です</p>';
+    if (d.date !== date && ys.length < NEED) {
+      h += '<p class="muted" style="margin:6px 0 0;">' + (isV2() ? '開催にはあと ' + (NEED - ys.length) + ' 名の○が必要です' : 'あと ' + (NEED - ys.length) + ' 名の○で開催決定です') + '</p>';
+    } else if (isV2() && d.date !== date && !r.decidedDate) {
+      h += '<p class="muted" style="margin:6px 0 0;">○は揃っています。開催の決定は、全員の回答が揃った時点（遅くとも最初の候補日の前日）です</p>';
+    }
     if (myId) {
-      h += '<div class="btns"><button data-resp="yes" data-date="' + date + '" class="' + (mine === "yes" ? "sel-yes" : "") + '">○ 出席できる</button>' +
-           '<button data-resp="no" data-date="' + date + '" class="' + (mine === "no" ? "sel-no" : "") + '">× できない</button></div>';
+      h += '<div class="btns"><button data-resp="yes" data-date="' + date + '" class="' + (mine === "yes" ? "sel-yes" : "") + '">○ 出席できる</button>';
+      if (isV2()) h += '<button data-resp="maybe" data-date="' + date + '" class="' + (mine === "maybe" ? "sel-maybe" : "") + '">？ わからない</button>';
+      h += '<button data-resp="no" data-date="' + date + '" class="' + (mine === "no" ? "sel-no" : "") + '">× できない</button></div>';
     }
     h += '<div class="grid">' + activeMembers().map(m => {
       const v = r.responses[m.id] ? r.responses[m.id][date] : undefined;
-      return "<b>" + esc(m.name) + "</b> " + (v === "yes" ? "○" : v === "no" ? "×" : "—");
+      return "<b>" + esc(m.name) + "</b> " + (v === "yes" ? "○" : v === "no" ? "×" : v === "maybe" ? "？" : "—");
     }).join("　") + "</div>";
     h += "</div>";
   }
@@ -367,23 +437,25 @@ function render() {
       '<p class="muted">「無理です」を押すと、次の方に確認が移ります。引き受け手がいない場合は、その回は見送りになります。</p></div>';
   }
 
-  /* 確定後の操作 */
+  /* 確定後の操作（対象の開催日を明示する） */
   if (d.date) {
-    h += '<div class="card"><h2>開催が終わったら / 変更</h2><div class="actions">' +
-      '<button id="btnDone">開催済みにする（担当の回数+1＆次の候補へ）</button>' +
-      '<button id="btnSwap" class="ghost">担当を交代する（次点に繰り上げ）</button>' +
+    h += '<div class="card"><h2>' + fmtDate(d.date) + ' 19:00 の回について</h2>' +
+      '<p class="muted" style="margin:0 0 10px;">下のボタンはすべて ' + fmtDate(d.date) + ' の回への操作です。</p><div class="actions">';
+    /* 「開催済み」ボタンは v1 ラウンドのみ（v2 はカレンダーで自動判定する） */
+    if (!isV2()) h += '<button id="btnDone">開催済みにする（担当の回数+1＆次の候補へ）</button>';
+    h += '<button id="btnSwap" class="ghost">担当を交代する（次点に繰り上げ）</button>' +
       '<button id="btnSkip" class="danger">この日は見送る</button></div>' +
-      '<p class="muted">担当の方が来れなくなった場合：開催まで1週間より前なら自動で次点に繰り上がります。1週間を切っている場合は次点の方にアプリで確認が届き、引き受け手がいなければその回は見送りになります。</p></div>';
+      '<p class="muted">' + fmtDate(d.date) + ' の担当の方が来れなくなった場合：' + fmtDate(d.date) + ' まで1週間より前なら、自動で次点の方に繰り上がります。1週間を切っている場合は次点の方にアプリで確認が届き、引き受け手がいなければ ' + fmtDate(d.date) + ' の回は見送りになります。</p></div>';
   }
 
   /* メンバー一覧 */
   const sorted = [...S.members].sort((a, b) => (a.active === b.active) ? priorityCmp(a, b) : (a.active ? -1 : 1));
-  h += '<div class="card"><h2>メンバー（次回担当の目安順）</h2><table><tr><th>順</th><th>名前</th><th>担当回数</th><th>直近担当</th><th>参考:直近1年</th></tr>';
+  h += '<div class="card"><h2>メンバー（次回担当の目安順）</h2><table><tr><th>順</th><th>名前</th><th>担当回数（直近1年）</th><th>直近担当</th></tr>';
   let rank = 0;
   for (const m of sorted) {
     h += '<tr class="' + (m.active ? "" : "inactive") + (myId === m.id ? " me" : "") + '"><td>' + (m.active ? (++rank) : "—") + "</td><td>" +
-      esc(m.name) + (m.active ? "" : "（休止）") + (d.presenterId === m.id ? '<span class="tag">次回担当</span>' : "") + (d.ask && d.ask.candidateId === m.id ? '<span class="tag">担当確認中</span>' : "") + "</td><td>" + m.count + "回</td><td>" +
-      fmtDateShort(m.lastDate) + "</td><td>" + m.refCount + "回</td></tr>";
+      esc(m.name) + (m.active ? "" : "（休止）") + (d.presenterId === m.id ? '<span class="tag">次回担当</span>' : "") + (d.ask && d.ask.candidateId === m.id ? '<span class="tag">担当確認中</span>' : "") + "</td><td>" + m.refCount + "回</td><td>" +
+      fmtDateShort(m.lastDate) + "</td></tr>";
   }
   h += "</table></div>";
 
@@ -433,22 +505,14 @@ function onRespond(date, val) {
     const cur = S.round.responses[myId][date];
     S.round.responses[myId][date] = (cur === val) ? undefined : val;
     if (S.round.responses[myId][date] === undefined) delete S.round.responses[myId][date];
-    pushHistory(member(myId).name + " さんが " + fmtDate(date) + " を " + (S.round.responses[myId][date] === "yes" ? "○" : S.round.responses[myId][date] === "no" ? "×" : "未回答") + " にしました");
+    const v = S.round.responses[myId][date];
+    pushHistory(member(myId).name + " さんが " + fmtDate(date) + " を " + (v === "yes" ? "○" : v === "no" ? "×" : v === "maybe" ? "？" : "未回答") + " にしました");
   }, "response update");
 }
 function onDone() {
   const d = derive(); if (!d.date) return;
   if (!confirm(fmtDate(d.date) + " の抄読会を「開催済み」にします。担当の " + (d.presenterId ? member(d.presenterId).name : "") + " さんの回数が+1され、次の候補日が表示されます。よろしいですか？")) return;
-  mutate(() => {
-    const att = yesIds(d.date);
-    S.sessions.push({ date: d.date, presenterId: d.presenterId, attendees: att });
-    if (d.presenterId) { const p = member(d.presenterId); p.count += 1; p.lastDate = d.date; }
-    pushHistory(fmtDate(d.date) + " の抄読会を開催済みにしました（担当：" + (d.presenterId ? member(d.presenterId).name : "?") + "）");
-    const keep = {};
-    const newCands = nextTuesdays(d.date, 4);
-    for (const id of Object.keys(S.round.responses)) { keep[id] = {}; for (const nd of newCands) if (S.round.responses[id][nd]) keep[id][nd] = S.round.responses[id][nd]; }
-    S.round = { seq: (S.round.seq || 1) + 1, candidates: newCands, responses: keep, excludedPresenters: [], decidedDate: null, decidedAt: null, presenterId: null, presenterDecidedAt: null, ask: null, presenterOverride: null };
-  }, "session completed");
+  mutate(() => { completeSession(d); }, "session completed");
 }
 function onSwap() {
   const d = derive(); if (!d.date || !d.presenterId) return;
@@ -480,10 +544,7 @@ function onSkip() {
   if (!confirm(fmtDate(d.date) + " の開催を見送ります。候補日はその次の火曜日から組み直されます。よろしいですか？")) return;
   mutate(() => {
     pushHistory(fmtDate(d.date) + " の開催が見送られました");
-    const keep = {};
-    const newCands = nextTuesdays(d.date, 4);
-    for (const id of Object.keys(S.round.responses)) { keep[id] = {}; for (const nd of newCands) if (S.round.responses[id][nd]) keep[id][nd] = S.round.responses[id][nd]; }
-    S.round = { seq: (S.round.seq || 1) + 1, candidates: newCands, responses: keep, excludedPresenters: [], decidedDate: null, decidedAt: null, presenterId: null, presenterDecidedAt: null, ask: null, presenterOverride: null };
+    S.round = buildNextRound(S.round, d.date);
   }, "session skipped");
 }
 
