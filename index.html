@@ -178,9 +178,9 @@ function dateImpossible(date){
   }
   return potential < NEED;
 }
-/* 担当の優先順位: 担当回数が少ない順 → 前回担当から空いている順 → 五十音順。
-   回数の基準は全ルール共通で count（直近3ヶ月）。refCount（直近1年）は参考表示のみ。
-   （2026-11-18: v2 で一時 refCount 基準にしたが、有馬の指示で直近3ヶ月に戻した） */
+/* 担当の優先順位（v1/v2系）: 担当回数が少ない順 → 前回担当から空いている順 → 五十音順。
+   v3 は pickPresenterV3 側の順序（実効の直近3ヶ月回数 → 実効の直近1年回数 → 実効の直近担当日 → 五十音）を使う。
+   （2026-11-18: v2 で一時 refCount 基準にしたが、有馬の指示で直近3ヶ月に戻した。2026-11-19: v3 のタイブレークに直近1年回数を追加） */
 function priorityCmp(a, b){
   const ka = a.count;
   const kb = b.count;
@@ -235,11 +235,22 @@ function effLast(m, exceptDate){
   for (const d of Object.keys(dec)) if (d !== exceptDate && dec[d].presenterId === m.id && d > l) l = d;
   return l;
 }
+/* 担当の実効の直近1年回数: 実績（refCount）に、確定済み・未開催の担当予定を仮加算する */
+function effRefCount(m, exceptDate){
+  let c = m.refCount;
+  const dec = (S.round && S.round.decisions) || {};
+  for (const d of Object.keys(dec)) if (d !== exceptDate && dec[d].presenterId === m.id) c++;
+  return c;
+}
+/* v3 の担当選定の優先順位（2026-11-19 有馬の指示でタイブレークを追加）:
+   実効の直近3ヶ月回数 → 実効の直近1年回数 → 実効の直近担当日が古い順 → 五十音順 */
 function pickPresenterV3(date, excluded){
   const ys = yesIds(date).map(member).filter(m => m.active && !(excluded || []).includes(m.id));
   ys.sort((a, b) => {
     const ca = effCount(a, date), cb = effCount(b, date);
     if (ca !== cb) return ca - cb;
+    const ra = effRefCount(a, date), rb = effRefCount(b, date);
+    if (ra !== rb) return ra - rb;
     const la = effLast(a, date), lb = effLast(b, date);
     if (la !== lb) return la < lb ? -1 : 1;
     return a.yomi < b.yomi ? -1 : 1;
@@ -566,13 +577,13 @@ function render() {
       h += '<p class="muted" style="margin:6px 0 0;">○は揃っています。開催の決定は、全員の回答が揃った時点（遅くとも最初の候補日の前日）です</p>';
     }
     if (v3 && dec) {
-      h += '<p style="margin:8px 0 0;">担当：<b>' + esc(member(dec.presenterId).name) + ' さん</b></p>';
-      h += '<div class="actions" style="margin-top:8px;"><button class="ghost" data-swap="' + date + '">担当を交代する（次点に繰り上げ）</button><button class="danger" data-skip="' + date + '">この日は流会にする</button></div>';
+      h += '<p style="margin:8px 0 0;">担当：<b>' + esc(member(dec.presenterId).name) + '</b></p>';
+      h += '<div class="actions" style="margin-top:8px;"><button class="danger" data-skip="' + date + '">この日は流会にする</button></div>';
     }
     if (myId && !dead) {
-      h += '<div class="btns"><button data-resp="yes" data-date="' + date + '" class="' + (mine === "yes" ? "sel-yes" : "") + '">○ 出席する</button>';
-      h += '<button data-resp="maybe" data-date="' + date + '" class="' + (mine === "maybe" ? "sel-maybe" : "") + '">？ 分からない</button>';
-      h += '<button data-resp="no" data-date="' + date + '" class="' + (mine === "no" ? "sel-no" : "") + '">× 出席しない</button></div>';
+      h += '<div class="btns"><button data-resp="yes" data-date="' + date + '" class="' + (mine === "yes" ? "sel-yes" : "") + '">○ 出席</button>';
+      h += '<button data-resp="maybe" data-date="' + date + '" class="' + (mine === "maybe" ? "sel-maybe" : "") + '">？ 不明</button>';
+      h += '<button data-resp="no" data-date="' + date + '" class="' + (mine === "no" ? "sel-no" : "") + '">× 欠席</button></div>';
     }
     h += '<div class="roster">' + activeMembers().map(m => {
       const v = r.responses[m.id] ? r.responses[m.id][date] : undefined;
@@ -596,7 +607,7 @@ function render() {
 
   /* メンバー一覧 */
   const sorted = [...S.members].sort((a, b) => (a.active === b.active) ? priorityCmp(a, b) : (a.active ? -1 : 1));
-  h += '<div class="card"><h2>メンバー（次回担当の目安順）</h2><table><tr><th>順</th><th>名前</th><th>担当回数（直近3ヶ月）</th><th>直近担当</th><th>参考:直近1年</th></tr>';
+  h += '<div class="card"><h2>メンバー（次回担当の目安順）</h2><table><tr><th>順</th><th>名前</th><th>担当回数（直近3ヶ月）</th><th>直近担当</th><th>担当回数（直近1年）</th></tr>';
   let rank = 0;
   for (const m of sorted) {
     let mtags = "";
@@ -636,7 +647,6 @@ function render() {
   const bd = document.getElementById("btnDone"); if (bd) bd.addEventListener("click", onDone);
   const bs = document.getElementById("btnSwap"); if (bs) bs.addEventListener("click", onSwap);
   const bk = document.getElementById("btnSkip"); if (bk) bk.addEventListener("click", onSkip);
-  app.querySelectorAll("[data-swap]").forEach(b => b.addEventListener("click", () => onSwapV3(b.dataset.swap)));
   app.querySelectorAll("[data-skip]").forEach(b => b.addEventListener("click", () => onSkipV3(b.dataset.skip)));
 }
 function setupHtml() {
@@ -680,24 +690,6 @@ function onSkip() {
     pushHistory(fmtDate(d.date) + " の開催が流会になりました");
     S.round = buildNextRound(S.round, d.date);
   }, "session skipped");
-}
-/* v3: その週の担当を手動で交代する（1週間を切っていれば休会の確認になる） */
-function onSwapV3(date) {
-  const dec = (S.round.decisions || {})[date]; if (!dec) return;
-  const cur = dec.presenterId;
-  if (daysUntil(date) < 7) {
-    if (!confirm(fmtDate(date) + " は開催まで1週間を切っています。担当が来れない場合、その週は休会になります。休会にしてよろしいですか？")) return;
-    mutate(() => { kyukaiDateV3(date, cur, true); }, "session kyukai");
-    return;
-  }
-  if (!confirm(fmtDate(date) + " の担当を " + member(cur).name + " さんから次点の方に交代します。よろしいですか？")) return;
-  mutate(() => {
-    const next = pickPresenterV3(date, [cur]);
-    if (next) {
-      S.round.decisions[date] = { presenterId: next, decidedAt: new Date().toISOString() };
-      pushHistory(fmtDate(date) + " の担当が " + member(next).name + " さんに交代しました（前担当：" + member(cur).name + "）");
-    } else { alert("交代できる方がいません"); }
-  }, "presenter swap");
 }
 /* v3: その週だけを流会にする */
 function onSkipV3(date) {
